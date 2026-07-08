@@ -86,3 +86,20 @@ python3 scripts/llm_endpoint_smoke.py --env-file .env.test
 ## CI
 
 CI is configured in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and runs lint, tests, and package build checks.
+
+## Citation
+
+If you use StateFuse, please cite the preprint:
+
+```bibtex
+@misc{volkov2026statefuse,
+  title={StateFuse: Deterministic Conflict-Preserving Memory for Multi-Agent Systems},
+  author={Volkov, Sergey and Li, Yang and Luo, Ye},
+  year={2026},
+  eprint={2607.05844},
+  archivePrefix={arXiv},
+  primaryClass={cs.AI},
+  doi={10.48550/arXiv.2607.05844},
+  url={https://arxiv.org/abs/2607.05844}
+}
+```
