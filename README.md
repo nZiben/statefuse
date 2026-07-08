@@ -83,10 +83,6 @@ python3 scripts/llm_endpoint_smoke.py --env-file .env.test
 - `examples/03_llm_resolver_demo.py`
 - `examples/env_test.py`
 
-## CI
-
-CI is configured in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and runs lint, tests, and package build checks.
-
 ## Citation
 
 If you use StateFuse, please cite the preprint:
