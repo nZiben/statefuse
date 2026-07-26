@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from statefuse import InMemoryStore, Memory
 from dataclasses import replace
 
+from statefuse import InMemoryStore, Memory
 from statefuse.auth import (
     claim_signature_status,
     retraction_signature_status,
@@ -11,7 +11,10 @@ from statefuse.auth import (
     verify_claim_signature,
     verify_retraction_signature,
 )
-from statefuse.compaction import compact_oplog_with_report, compact_projection_equivalent_with_report
+from statefuse.compaction import (
+    compact_oplog_with_report,
+    compact_projection_equivalent_with_report,
+)
 from statefuse.materialize import materialize
 from statefuse.merge import merge, merge_checked_authenticated
 from statefuse.model import Claim, ClaimKey
@@ -113,7 +116,9 @@ def test_compaction_preserves_materialized_state_and_tombstones() -> None:
     assert original_state.conflicts == compacted_state.conflicts
 
     old_claim_op = next(
-        op for op in original.iter_ops() if isinstance(op, ClaimAdded) and op.claim.claim_id == old_claim_id
+        op
+        for op in original.iter_ops()
+        if isinstance(op, ClaimAdded) and op.claim.claim_id == old_claim_id
     )
     merged = merge(compacted, OpLog([old_claim_op]))
     merged_state = materialize(merged)

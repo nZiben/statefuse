@@ -4,11 +4,11 @@ import argparse
 import os
 import pathlib
 import sys
-from typing import Mapping
+from collections.abc import Mapping
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from statefuse import InMemoryStore, Memory, ViewConstraints, merge, materialize
+from statefuse import InMemoryStore, Memory, ViewConstraints, materialize, merge
 from statefuse.resolver_llm import LLMResolver, OpenAIResponsesClient
 from statefuse.view import build_view
 
@@ -52,12 +52,16 @@ def _build_resolver(use_real_llm: bool) -> tuple[LLMResolver, str]:
 
     api_key = (os.getenv("STATEFUSE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY or STATEFUSE_OPENAI_API_KEY is required for --real-llm mode.")
+        raise RuntimeError(
+            "OPENAI_API_KEY or STATEFUSE_OPENAI_API_KEY is required for --real-llm mode."
+        )
 
     model = os.getenv("STATEFUSE_OPENAI_MODEL", "gpt-4o-mini")
     temperature = float(os.getenv("STATEFUSE_OPENAI_TEMPERATURE", "0"))
     seed_raw = os.getenv("STATEFUSE_OPENAI_SEED")
-    base_url = (os.getenv("STATEFUSE_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").strip()
+    base_url = (
+        os.getenv("STATEFUSE_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or ""
+    ).strip()
     api_mode = os.getenv("STATEFUSE_OPENAI_API_MODE", "auto")
     seed = int(seed_raw) if seed_raw else None
     return (

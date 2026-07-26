@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, Iterator
+from collections.abc import Iterable, Iterator
 
 from .ops import AnyOp
 
@@ -36,7 +36,7 @@ class OpLog:
     def op_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._ops))
 
-    def copy(self) -> "OpLog":
+    def copy(self) -> OpLog:
         return OpLog(self.iter_ops())
 
     def __iter__(self) -> Iterator[AnyOp]:

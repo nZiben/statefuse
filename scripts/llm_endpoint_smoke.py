@@ -6,7 +6,6 @@ import os
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -52,7 +51,10 @@ def run_smoke_check(
     temperature: float,
 ) -> dict[str, str]:
     raw = client.resolve_json(
-        system_prompt='Return JSON only in the exact shape {"status":"ok","mode":"chat_completions or responses"}.',
+        system_prompt=(
+            'Return JSON only in the exact shape {"status":"ok",'
+            '"mode":"chat_completions or responses"}.'
+        ),
         input_payload={
             "task": "smoke-test",
             "instructions": {"status": "literal ok", "mode": "transport mode used"},
@@ -85,7 +87,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Validate an OpenAI-compatible endpoint.")
     parser.add_argument("--env-file", type=Path, default=None, help="Optional env file to load.")
     parser.add_argument("--model", type=str, default="", help="Optional model override.")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Temperature for the smoke request.")
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Temperature for the smoke request.",
+    )
     parser.add_argument(
         "--require-base-url",
         action="store_true",
@@ -98,7 +105,11 @@ def main() -> None:
         _load_env_file(args.env_file)
     client = OpenAIResponsesClient.from_env()
     model = args.model or os.getenv("STATEFUSE_OPENAI_MODEL", "").strip()
-    summary = validate_client_configuration(client, model=model, require_base_url=args.require_base_url)
+    summary = validate_client_configuration(
+        client,
+        model=model,
+        require_base_url=args.require_base_url,
+    )
     result = run_smoke_check(client, model=model, temperature=args.temperature)
     payload = {**summary, **result}
     if args.out is not None:

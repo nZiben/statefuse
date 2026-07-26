@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping, TypeVar, cast
+from typing import Any, ClassVar, TypeVar, cast
 
-from .model import Claim, Decision, Evidence
+from .model import (
+    Claim,
+    ConflictLifecycleEvent,
+    Decision,
+    Derivation,
+    Evidence,
+    ResolutionRecord,
+    Source,
+)
 from .utils import canonical_json_dumps, canonical_json_loads
 
 
@@ -65,7 +74,7 @@ class Op:
         return canonical_json_dumps(self.to_dict())
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "AnyOp":
+    def from_dict(cls, payload: Mapping[str, Any]) -> AnyOp:
         op_type = payload.get("op_type")
         if not isinstance(op_type, str):
             raise ValueError("op_type must be present and must be a string.")
@@ -75,15 +84,33 @@ class Op:
         return op_cls._from_dict(payload)
 
     @classmethod
-    def from_json(cls, payload: str) -> "AnyOp":
+    def from_json(cls, payload: str) -> AnyOp:
         data = canonical_json_loads(payload)
         if not isinstance(data, dict):
             raise ValueError("Operation JSON must decode to an object.")
         return cls.from_dict(data)
 
     @classmethod
-    def _from_dict(cls, payload: Mapping[str, Any]) -> "Op":
+    def _from_dict(cls, payload: Mapping[str, Any]) -> Op:
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class SourceAdded(Op):
+    source: Source
+    op_type: ClassVar[str] = "SourceAdded"
+
+    def _payload_to_dict(self) -> dict[str, Any]:
+        return {"source": self.source.to_dict()}
+
+    @classmethod
+    def _from_dict(cls, payload: Mapping[str, Any]) -> SourceAdded:
+        return cls(
+            op_id=_require_str(payload, "op_id"),
+            replica_id=_require_str(payload, "replica_id"),
+            timestamp=_require_str(payload, "timestamp"),
+            source=Source.from_dict(_mapping_value(payload, "source")),
+        )
 
 
 @dataclass(frozen=True)
@@ -95,7 +122,7 @@ class EvidenceAdded(Op):
         return {"evidence": self.evidence.to_dict()}
 
     @classmethod
-    def _from_dict(cls, payload: Mapping[str, Any]) -> "EvidenceAdded":
+    def _from_dict(cls, payload: Mapping[str, Any]) -> EvidenceAdded:
         return cls(
             op_id=_require_str(payload, "op_id"),
             replica_id=_require_str(payload, "replica_id"),
@@ -113,7 +140,7 @@ class ClaimAdded(Op):
         return {"claim": self.claim.to_dict()}
 
     @classmethod
-    def _from_dict(cls, payload: Mapping[str, Any]) -> "ClaimAdded":
+    def _from_dict(cls, payload: Mapping[str, Any]) -> ClaimAdded:
         return cls(
             op_id=_require_str(payload, "op_id"),
             replica_id=_require_str(payload, "replica_id"),
@@ -154,7 +181,7 @@ class ClaimRetracted(Op):
         }
 
     @classmethod
-    def _from_dict(cls, payload: Mapping[str, Any]) -> "ClaimRetracted":
+    def _from_dict(cls, payload: Mapping[str, Any]) -> ClaimRetracted:
         return cls(
             op_id=_require_str(payload, "op_id"),
             replica_id=_require_str(payload, "replica_id"),
@@ -179,7 +206,7 @@ class DecisionAdded(Op):
         return {"decision": self.decision.to_dict()}
 
     @classmethod
-    def _from_dict(cls, payload: Mapping[str, Any]) -> "DecisionAdded":
+    def _from_dict(cls, payload: Mapping[str, Any]) -> DecisionAdded:
         return cls(
             op_id=_require_str(payload, "op_id"),
             replica_id=_require_str(payload, "replica_id"),
@@ -188,13 +215,80 @@ class DecisionAdded(Op):
         )
 
 
-AnyOp = EvidenceAdded | ClaimAdded | ClaimRetracted | DecisionAdded
+@dataclass(frozen=True)
+class DerivationAdded(Op):
+    derivation: Derivation
+    op_type: ClassVar[str] = "DerivationAdded"
+
+    def _payload_to_dict(self) -> dict[str, Any]:
+        return {"derivation": self.derivation.to_dict()}
+
+    @classmethod
+    def _from_dict(cls, payload: Mapping[str, Any]) -> DerivationAdded:
+        return cls(
+            op_id=_require_str(payload, "op_id"),
+            replica_id=_require_str(payload, "replica_id"),
+            timestamp=_require_str(payload, "timestamp"),
+            derivation=Derivation.from_dict(_mapping_value(payload, "derivation")),
+        )
+
+
+@dataclass(frozen=True)
+class ResolutionAdded(Op):
+    resolution: ResolutionRecord
+    op_type: ClassVar[str] = "ResolutionAdded"
+
+    def _payload_to_dict(self) -> dict[str, Any]:
+        return {"resolution": self.resolution.to_dict()}
+
+    @classmethod
+    def _from_dict(cls, payload: Mapping[str, Any]) -> ResolutionAdded:
+        return cls(
+            op_id=_require_str(payload, "op_id"),
+            replica_id=_require_str(payload, "replica_id"),
+            timestamp=_require_str(payload, "timestamp"),
+            resolution=ResolutionRecord.from_dict(_mapping_value(payload, "resolution")),
+        )
+
+
+@dataclass(frozen=True)
+class ConflictLifecycleEventAdded(Op):
+    event: ConflictLifecycleEvent
+    op_type: ClassVar[str] = "ConflictLifecycleEventAdded"
+
+    def _payload_to_dict(self) -> dict[str, Any]:
+        return {"event": self.event.to_dict()}
+
+    @classmethod
+    def _from_dict(cls, payload: Mapping[str, Any]) -> ConflictLifecycleEventAdded:
+        return cls(
+            op_id=_require_str(payload, "op_id"),
+            replica_id=_require_str(payload, "replica_id"),
+            timestamp=_require_str(payload, "timestamp"),
+            event=ConflictLifecycleEvent.from_dict(_mapping_value(payload, "event")),
+        )
+
+
+AnyOp = (
+    SourceAdded
+    | EvidenceAdded
+    | ClaimAdded
+    | ClaimRetracted
+    | DecisionAdded
+    | DerivationAdded
+    | ResolutionAdded
+    | ConflictLifecycleEventAdded
+)
 
 _OpType = TypeVar("_OpType", bound=Op)
 
 _OP_TYPES: dict[str, type[_OpType]] = {
+    SourceAdded.op_type: cast(type[_OpType], SourceAdded),
     EvidenceAdded.op_type: cast(type[_OpType], EvidenceAdded),
     ClaimAdded.op_type: cast(type[_OpType], ClaimAdded),
     ClaimRetracted.op_type: cast(type[_OpType], ClaimRetracted),
     DecisionAdded.op_type: cast(type[_OpType], DecisionAdded),
+    DerivationAdded.op_type: cast(type[_OpType], DerivationAdded),
+    ResolutionAdded.op_type: cast(type[_OpType], ResolutionAdded),
+    ConflictLifecycleEventAdded.op_type: cast(type[_OpType], ConflictLifecycleEventAdded),
 }

@@ -7,7 +7,10 @@ StateFuse is a lightweight Python library for deterministic, conflict-preserving
 StateFuse gives agent systems a mergeable memory substrate with:
 
 - immutable operation history
+- canonical source, evidence, and derivation records
+- temporal claim validity without changing assertion timestamps
 - explicit surfaced conflicts instead of silent overwrite
+- append-only conflict lifecycle and committed, scope-aware resolutions
 - exact and semantic correction handles via `claim_id` and `claim_ref`
 - deterministic materialization and projection
 - optional authenticated merge checks and bounded compaction helpers
@@ -32,12 +35,23 @@ python3 -m pip install -e ".[llm]"
 from statefuse import Memory
 
 mem = Memory(replica_id="agent-a")
+source_id = mem.add_source(
+    source_type="user_message",
+    actor_id="user-1",
+    message_id="message-1",
+)
+evidence_id = mem.add_evidence(
+    pointer="message://message-1",
+    content="The launch deadline is 2026-04-10.",
+    source_id=source_id,
+)
 mem.add_claim(
     namespace="project",
     subject="launch",
     predicate="deadline",
     value="2026-04-10",
     confidence=0.8,
+    evidence_ids=[evidence_id],
 )
 ```
 
@@ -50,6 +64,14 @@ mem = Memory(replica_id="agent-a", op_id_mode="content-addressed")
 ```
 
 Strict `merge()` keeps fail-fast behavior on invalid `op_id` payload collisions. Use `merge_checked()` when a sync pipeline should quarantine bad collisions instead of failing the whole merge.
+
+## Conflict lifecycle
+
+A derived conflict has two identities: `conflict_id` names the exact candidate snapshot, while `conflict_ref` remains stable as candidates arrive or are retracted. A `ResolutionRecord` is an explicit application or human commit; the existing resolver result remains an ephemeral projection-time recommendation.
+
+`build_view()` applies a committed resolution only in its matching scope and only while every current candidate is covered. The selected claim changes in that view, but the conflict remains in `surfaced_conflicts`. An uncovered candidate makes the resolution stale/reopened instead of inheriting it silently. Sources, evidence, claim validity, derivations, resolutions, and lifecycle events all remain immutable operations in the canonical log.
+
+Until StateFuse has a signed operation envelope, `merge_checked_authenticated(..., require_signed=True)` quarantines resolution and lifecycle operations rather than trusting unsigned authority changes.
 
 ## Development
 

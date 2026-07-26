@@ -32,7 +32,18 @@ def compact_oplog_with_report(oplog: OpLog) -> CompactionReport:
     return compact_projection_equivalent_with_report(oplog)
 
 
-def _projection_signature(oplog: OpLog, *, predicate_registry: PredicateRegistry, constraints: ViewConstraints, resolver: Resolver) -> tuple[tuple[str, str], tuple[str, ...], tuple[str, ...], tuple[tuple[str, str], ...]]:
+def _projection_signature(
+    oplog: OpLog,
+    *,
+    predicate_registry: PredicateRegistry,
+    constraints: ViewConstraints,
+    resolver: Resolver,
+) -> tuple[
+    tuple[str, str],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[tuple[str, str], ...],
+]:
     state = materialize(oplog, predicate_registry=predicate_registry)
     projection = build_view(
         state=state,
@@ -89,19 +100,24 @@ def compact_projection_equivalent_with_report(
         for retraction in retractions:
             retraction_op_ids.add(retraction.op_id)
             needed_evidence_ids.update(retraction.evidence_ids)
+    for resolution in state.resolutions_by_id.values():
+        needed_evidence_ids.update(resolution.evidence_ids)
 
     kept_ops = []
     for op in oplog.iter_ops():
-        if isinstance(op, EvidenceAdded) and op.evidence.evidence_id in needed_evidence_ids:
-            kept_ops.append(op)
-            continue
-        if isinstance(op, ClaimAdded) and op.claim.claim_id in active_claim_ids:
-            kept_ops.append(op)
-            continue
-        if isinstance(op, ClaimRetracted) and op.op_id in retraction_op_ids:
-            kept_ops.append(op)
-            continue
-        if isinstance(op, DecisionAdded) and op.decision.decision_id in active_decision_ids:
+        if isinstance(op, EvidenceAdded):
+            if op.evidence.evidence_id in needed_evidence_ids:
+                kept_ops.append(op)
+        elif isinstance(op, ClaimAdded):
+            if op.claim.claim_id in active_claim_ids:
+                kept_ops.append(op)
+        elif isinstance(op, ClaimRetracted):
+            if op.op_id in retraction_op_ids:
+                kept_ops.append(op)
+        elif isinstance(op, DecisionAdded):
+            if op.decision.decision_id in active_decision_ids:
+                kept_ops.append(op)
+        else:
             kept_ops.append(op)
 
     compacted = OpLog(kept_ops)
@@ -123,7 +139,9 @@ def compact_projection_equivalent_with_report(
         compacted=compacted,
         original_ops=len(oplog),
         compacted_ops=len(compacted),
-        active_claims_equivalent=original_state.active_claims_by_key == compacted_state.active_claims_by_key,
+        active_claims_equivalent=(
+            original_state.active_claims_by_key == compacted_state.active_claims_by_key
+        ),
         conflicts_equivalent=original_state.conflicts == compacted_state.conflicts,
         projections_equivalent=original_projection == compacted_projection,
     )

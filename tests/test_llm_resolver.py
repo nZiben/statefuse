@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sys
 import time
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 from statefuse.materialize import materialize
 from statefuse.model import Claim, ClaimKey
@@ -135,7 +135,9 @@ def test_openai_client_from_env_defaults_to_chat_completions(monkeypatch) -> Non
 
 
 def test_llm_endpoint_validation_requires_base_url_when_requested() -> None:
-    client = OpenAIResponsesClient(client=SimpleNamespace(), api_key="test-key", api_mode="chat_completions")
+    client = OpenAIResponsesClient(
+        client=SimpleNamespace(), api_key="test-key", api_mode="chat_completions"
+    )
     try:
         validate_client_configuration(client, model="test-model", require_base_url=True)
     except RuntimeError as exc:
@@ -151,7 +153,9 @@ def test_openai_client_hard_timeout_raises_timeout_error() -> None:
             return SimpleNamespace(choices=[])
 
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_SlowChat()))
-    client = OpenAIResponsesClient(client=fake_client, api_mode="chat_completions", hard_timeout=0.01)
+    client = OpenAIResponsesClient(
+        client=fake_client, api_mode="chat_completions", hard_timeout=0.01
+    )
     try:
         client.resolve_json(
             system_prompt="system",

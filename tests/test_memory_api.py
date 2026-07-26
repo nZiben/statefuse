@@ -104,7 +104,11 @@ def test_content_addressed_op_id_mode_is_available() -> None:
 
 def test_claim_ref_helper_respects_predicate_contract_normalization() -> None:
     registry = PredicateRegistry()
-    registry.register("city", normalize=lambda value: str(value).strip().lower(), normalize_for_claim_ref=True)
+    registry.register(
+        "city",
+        normalize=lambda value: str(value).strip().lower(),
+        normalize_for_claim_ref=True,
+    )
     mem = Memory(store=InMemoryStore(), replica_id="agentA", predicate_registry=registry)
     ts = "2026-03-01T00:00:00.000000Z"
     left = mem.claim_ref_for(

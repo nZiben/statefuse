@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, MutableMapping
+from collections.abc import Mapping, MutableMapping
+from typing import Any
 
 from .oplog import OpLog
 from .ops import AnyOp, Op
@@ -40,7 +41,10 @@ def merged_graph_state_ops(
     key: str = "statefuse_ops",
 ) -> list[dict[str, Any]]:
     merged = OpLog()
-    for oplog in (oplog_from_graph_state(left_state, key=key), oplog_from_graph_state(right_state, key=key)):
+    for oplog in (
+        oplog_from_graph_state(left_state, key=key),
+        oplog_from_graph_state(right_state, key=key),
+    ):
         for op in oplog.iter_ops():
             merged.add(op)
     return [op.to_dict() for op in merged.iter_ops()]

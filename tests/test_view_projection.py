@@ -5,7 +5,12 @@ from statefuse.materialize import materialize
 from statefuse.model import Claim, ClaimKey
 from statefuse.oplog import OpLog
 from statefuse.ops import ClaimAdded
-from statefuse.resolver import ConservativeHeuristicResolver, HeuristicResolver, Resolution, ViewConstraints
+from statefuse.resolver import (
+    ConservativeHeuristicResolver,
+    HeuristicResolver,
+    Resolution,
+    ViewConstraints,
+)
 from statefuse.view import build_view
 
 
@@ -77,7 +82,8 @@ def test_build_view_does_not_mutate_materialized_state() -> None:
     )
     state = materialize(oplog)
     before_claim_ids = {
-        key: tuple(claim.claim_id for claim in claims) for key, claims in state.active_claims_by_key.items()
+        key: tuple(claim.claim_id for claim in claims)
+        for key, claims in state.active_claims_by_key.items()
     }
     before_conflicts = tuple(conflict.conflict_id for conflict in state.conflicts)
 
@@ -88,7 +94,8 @@ def test_build_view_does_not_mutate_materialized_state() -> None:
     )
 
     after_claim_ids = {
-        key: tuple(claim.claim_id for claim in claims) for key, claims in state.active_claims_by_key.items()
+        key: tuple(claim.claim_id for claim in claims)
+        for key, claims in state.active_claims_by_key.items()
     }
     after_conflicts = tuple(conflict.conflict_id for conflict in state.conflicts)
     assert after_claim_ids == before_claim_ids

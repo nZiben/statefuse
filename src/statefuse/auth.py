@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
 import hmac
-from typing import Mapping
+from collections.abc import Mapping
+from dataclasses import replace
 
 from .model import Claim
 from .ops import ClaimRetracted
@@ -68,7 +68,11 @@ def sign_retraction(retraction: ClaimRetracted, *, secret: str, key_id: str) -> 
     return replace(unsigned, signature=signature)
 
 
-def retraction_signature_status(retraction: ClaimRetracted, *, key_secrets: Mapping[str, str]) -> str:
+def retraction_signature_status(
+    retraction: ClaimRetracted,
+    *,
+    key_secrets: Mapping[str, str],
+) -> str:
     key_id = retraction.signing_key_id
     signature = retraction.signature
     if not isinstance(key_id, str) or not key_id:
@@ -84,5 +88,9 @@ def retraction_signature_status(retraction: ClaimRetracted, *, key_secrets: Mapp
     return "invalid"
 
 
-def verify_retraction_signature(retraction: ClaimRetracted, *, key_secrets: Mapping[str, str]) -> bool:
+def verify_retraction_signature(
+    retraction: ClaimRetracted,
+    *,
+    key_secrets: Mapping[str, str],
+) -> bool:
     return retraction_signature_status(retraction, key_secrets=key_secrets) == "verified"

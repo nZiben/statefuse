@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
-from dataclasses import dataclass
 import multiprocessing as mp
 import os
 import signal
-from typing import Any, Mapping, Protocol
+from collections.abc import Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from .conflict import ConflictSet
 from .materialize import MemoryState
 from .resolver import Resolution, ViewConstraints
 from .utils import canonical_json_dumps
-
 
 SYSTEM_PROMPT = (
     "You are a merge conflict resolver for agent memory. "
@@ -247,9 +247,13 @@ class OpenAIResponsesClient:
         self.last_transport_mode: str | None = None
 
     @classmethod
-    def from_env(cls) -> "OpenAIResponsesClient":
-        api_key = (os.getenv("STATEFUSE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip() or None
-        base_url = (os.getenv("STATEFUSE_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "").strip() or None
+    def from_env(cls) -> OpenAIResponsesClient:
+        api_key = (
+            os.getenv("STATEFUSE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+        ).strip() or None
+        base_url = (
+            os.getenv("STATEFUSE_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or ""
+        ).strip() or None
         api_mode = os.getenv("STATEFUSE_OPENAI_API_MODE", "chat_completions")
         timeout_raw = (os.getenv("STATEFUSE_OPENAI_TIMEOUT") or "").strip()
         timeout = float(timeout_raw) if timeout_raw else None
@@ -326,9 +330,9 @@ class OpenAIResponsesClient:
                     )
                     self.last_transport_mode = "chat_completions"
                     return raw
-                except Exception:
+                except Exception as chat_error:
                     if response_error is not None:
-                        raise response_error
+                        raise response_error from chat_error
                     raise
 
         raise RuntimeError("No API mode available for LLM resolution.")
@@ -429,7 +433,9 @@ class OpenAIResponsesClient:
                 {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
                 {
                     "role": "user",
-                    "content": [{"type": "text", "text": canonical_json_dumps(dict(input_payload))}],
+                    "content": [
+                        {"type": "text", "text": canonical_json_dumps(dict(input_payload))}
+                    ],
                 },
             ],
         }

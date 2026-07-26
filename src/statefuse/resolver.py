@@ -116,7 +116,9 @@ class HeuristicResolver:
         supersedes_epoch = self._latest_supersede_epoch(claim.claim_id, state)
         has_supersede = 1 if supersedes_epoch is not None else 0
         supersedes_value = supersedes_epoch if supersedes_epoch is not None else -1.0
-        evidence_quality, source_rank, freshness_rank, trust_rank = self._evidence_rankings(claim, state)
+        evidence_quality, source_rank, freshness_rank, trust_rank = self._evidence_rankings(
+            claim, state
+        )
         claim_epoch = parse_utc_iso(claim.timestamp).timestamp()
         evidence_count = len(claim.evidence_ids)
         replica_score = self._preference_score(
@@ -204,7 +206,9 @@ class ConservativeHeuristicResolver(HeuristicResolver):
         if not conflict.candidates:
             return Resolution(chosen_claim_id=None, reason="No candidates available for conflict.")
 
-        scored: list[tuple[Claim, tuple[int, float, int, int, int, int, float, float, int, int]]] = []
+        scored: list[
+            tuple[Claim, tuple[int, float, int, int, int, int, float, float, int, int]]
+        ] = []
         for claim in conflict.candidates:
             scored.append((claim, self._score_claim(claim, constraints, state)))
 
@@ -219,7 +223,10 @@ class ConservativeHeuristicResolver(HeuristicResolver):
 
         ordered = sorted(scored, key=lambda item: (item[1], item[0].claim_id), reverse=True)
         best_claim, best = ordered[0]
-        runner_up: tuple[Claim, tuple[int, float, int, int, int, int, float, float, int, int]] | None = None
+        runner_up: (
+            tuple[Claim, tuple[int, float, int, int, int, int, float, float, int, int]]
+            | None
+        ) = None
         for candidate, score in ordered[1:]:
             if str(candidate.value) != str(best_claim.value):
                 runner_up = (candidate, score)
@@ -234,7 +241,10 @@ class ConservativeHeuristicResolver(HeuristicResolver):
 
         return Resolution(
             chosen_claim_id=best_claim.claim_id,
-            reason="Conservative heuristic selected the highest-ranked claim without a close competitor.",
+            reason=(
+                "Conservative heuristic selected the highest-ranked claim without a close "
+                "competitor."
+            ),
             confidence=best_claim.confidence,
             metadata={"scores": {claim.claim_id: score for claim, score in scored}},
         )

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
-from typing import Collection, Mapping
 
 from .auth import claim_signature_status, retraction_signature_status
 from .oplog import OpLog
-from .ops import AnyOp, ClaimAdded, ClaimRetracted
+from .ops import (
+    AnyOp,
+    ClaimAdded,
+    ClaimRetracted,
+    ConflictLifecycleEventAdded,
+    ResolutionAdded,
+)
 from .utils import parse_utc_iso
 
 
@@ -88,8 +94,15 @@ def _authenticated_reason(
             parse_utc_iso(op.timestamp)
             if isinstance(op, ClaimAdded):
                 parse_utc_iso(op.claim.timestamp)
+            if isinstance(op, ResolutionAdded):
+                parse_utc_iso(op.resolution.timestamp)
+            if isinstance(op, ConflictLifecycleEventAdded):
+                parse_utc_iso(op.event.timestamp)
         except Exception:
             return "invalid_timestamp"
+
+    if require_signed and isinstance(op, (ResolutionAdded, ConflictLifecycleEventAdded)):
+        return "authority_signature_unsupported"
 
     if isinstance(op, ClaimAdded):
         key_id = str(op.claim.provenance.get("signing_key_id", "") or "")

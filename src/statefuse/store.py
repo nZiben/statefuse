@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Protocol
 
 from .oplog import OpLog
 from .ops import AnyOp, Op
@@ -105,7 +106,9 @@ class SQLiteStore:
                 )
                 return True
             except sqlite3.IntegrityError:
-                row = conn.execute("SELECT payload FROM ops WHERE op_id = ?", (op.op_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT payload FROM ops WHERE op_id = ?", (op.op_id,)
+                ).fetchone()
                 if row and row[0] == payload:
                     return False
                 raise ValueError(f"op_id collision with different payload: {op.op_id}") from None

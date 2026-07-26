@@ -15,14 +15,48 @@ from .compaction import (
     compact_projection_equivalent,
     compact_projection_equivalent_with_report,
 )
-from .conflict import ConflictSet, PredicateContractError, PredicateRegistry
+from .conflict import (
+    ConflictSet,
+    PredicateContractError,
+    PredicateRegistry,
+    derive_conflict_id,
+    derive_conflict_ref,
+)
 from .materialize import MemoryState, materialize
 from .memory import Memory, OpIdMode
 from .merge import MergeReport, QuarantinedOp, merge, merge_checked, merge_checked_authenticated
-from .model import Claim, ClaimKey, Decision, Evidence, derive_claim_ref
+from .model import (
+    Claim,
+    ClaimKey,
+    ConflictLifecycleEvent,
+    Decision,
+    Derivation,
+    Evidence,
+    ResolutionRecord,
+    Source,
+    ValidityInterval,
+    derive_claim_ref,
+)
 from .oplog import OpLog
-from .ops import AnyOp, ClaimAdded, ClaimRetracted, DecisionAdded, EvidenceAdded, Op
-from .resolver import ConservativeHeuristicResolver, HeuristicResolver, Resolution, Resolver, ViewConstraints
+from .ops import (
+    AnyOp,
+    ClaimAdded,
+    ClaimRetracted,
+    ConflictLifecycleEventAdded,
+    DecisionAdded,
+    DerivationAdded,
+    EvidenceAdded,
+    Op,
+    ResolutionAdded,
+    SourceAdded,
+)
+from .resolver import (
+    ConservativeHeuristicResolver,
+    HeuristicResolver,
+    Resolution,
+    Resolver,
+    ViewConstraints,
+)
 from .store import InMemoryStore, JsonlStore, OpStore, SQLiteStore
 from .view import Projection, build_view
 
@@ -40,9 +74,15 @@ __all__ = [
     "compact_projection_equivalent_with_report",
     "ConservativeHeuristicResolver",
     "ConflictSet",
+    "ConflictLifecycleEvent",
+    "ConflictLifecycleEventAdded",
     "Decision",
     "DecisionAdded",
     "derive_claim_ref",
+    "derive_conflict_id",
+    "derive_conflict_ref",
+    "Derivation",
+    "DerivationAdded",
     "Evidence",
     "EvidenceAdded",
     "HeuristicResolver",
@@ -63,11 +103,16 @@ __all__ = [
     "Projection",
     "QuarantinedOp",
     "Resolution",
+    "ResolutionAdded",
+    "ResolutionRecord",
     "Resolver",
     "retraction_signature_status",
     "sign_claim",
     "sign_retraction",
     "SQLiteStore",
+    "Source",
+    "SourceAdded",
+    "ValidityInterval",
     "ViewConstraints",
     "verify_claim_signature",
     "verify_retraction_signature",

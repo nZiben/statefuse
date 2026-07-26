@@ -33,8 +33,12 @@ def _claim_op(op_id: str, claim_id: str, value: str, replica: str) -> ClaimAdded
 
 
 def test_merge_commutative_associative_idempotent() -> None:
-    oplog_a = OpLog([_evidence_op("op-1", "sha256:1", "a"), _claim_op("op-2", "c1", "2026-03-25", "a")])
-    oplog_b = OpLog([_evidence_op("op-3", "sha256:2", "b"), _claim_op("op-4", "c2", "2026-03-26", "b")])
+    oplog_a = OpLog(
+        [_evidence_op("op-1", "sha256:1", "a"), _claim_op("op-2", "c1", "2026-03-25", "a")]
+    )
+    oplog_b = OpLog(
+        [_evidence_op("op-3", "sha256:2", "b"), _claim_op("op-4", "c2", "2026-03-26", "b")]
+    )
     oplog_c = OpLog([_evidence_op("op-5", "sha256:3", "c")])
 
     assert merge(oplog_a, oplog_b) == merge(oplog_b, oplog_a)

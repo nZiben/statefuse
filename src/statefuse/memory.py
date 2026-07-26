@@ -6,13 +6,32 @@ from .auth import sign_claim
 from .conflict import PredicateRegistry
 from .materialize import MemoryState, materialize
 from .merge import merge
-from .model import Claim, ClaimKey, Decision, Evidence, JSONValue, derive_claim_ref
+from .model import (
+    Claim,
+    ClaimKey,
+    Decision,
+    Evidence,
+    JSONValue,
+    ResolutionRecord,
+    Source,
+    ValidityInterval,
+    derive_claim_ref,
+)
 from .oplog import OpLog
-from .ops import AnyOp, ClaimAdded, ClaimRetracted, DecisionAdded, EvidenceAdded
+from .ops import (
+    AnyOp,
+    ClaimAdded,
+    ClaimRetracted,
+    DecisionAdded,
+    EvidenceAdded,
+    ResolutionAdded,
+    SourceAdded,
+)
 from .resolver import HeuristicResolver, Resolver, ViewConstraints
 from .store import InMemoryStore, OpStore
 from .utils import content_addressed_op_id, digest_content, digest_json_value, new_uuid, utc_now_iso
-from .view import Projection, build_view as build_projection
+from .view import Projection
+from .view import build_view as build_projection
 
 OpIdMode = Literal["uuid4", "content-addressed"]
 
@@ -41,26 +60,89 @@ class Memory:
     def load_oplog(self) -> OpLog:
         return self.store.load_oplog()
 
+    def add_source(
+        self,
+        *,
+        source_type: str,
+        uri: str | None = None,
+        system: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        message_id: str | None = None,
+        timestamp: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_id: str | None = None,
+        op_id: str | None = None,
+    ) -> str:
+        source_metadata = dict(metadata or {})
+        source_body = {
+            "source_type": source_type,
+            "uri": uri,
+            "system": system,
+            "actor_id": actor_id,
+            "session_id": session_id,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "metadata": source_metadata,
+        }
+        source = Source(
+            source_id=source_id or f"sha256:{digest_json_value(source_body)}",
+            **source_body,
+        )
+        op_timestamp = utc_now_iso()
+        op = SourceAdded(
+            op_id=op_id
+            or self._new_op_id("SourceAdded", op_timestamp, {"source": source.to_dict()}),
+            replica_id=self.replica_id,
+            timestamp=op_timestamp,
+            source=source,
+        )
+        self.store.append(op)
+        return source.source_id
+
     def add_evidence(
         self,
-        pointer: str,
+        pointer: str | None = None,
         *,
         content: Any = None,
         metadata: dict[str, Any] | None = None,
+        source_id: str | None = None,
+        content_digest: str | None = None,
         evidence_id: str | None = None,
         op_id: str | None = None,
     ) -> str:
         if evidence_id is None:
-            digest = digest_content(content) if content is not None else digest_json_value({"pointer": pointer})
+            if source_id is None and content_digest is None:
+                digest = (
+                    digest_content(content)
+                    if content is not None
+                    else digest_json_value({"pointer": pointer})
+                )
+            else:
+                identity_digest = content_digest
+                if identity_digest is None and content is not None:
+                    identity_digest = f"sha256:{digest_content(content)}"
+                digest = digest_json_value(
+                    {
+                        "pointer": pointer,
+                        "source_id": source_id,
+                        "content_digest": identity_digest,
+                    }
+                )
             evidence_id = f"sha256:{digest}"
         timestamp = utc_now_iso()
         evidence = Evidence(
             evidence_id=evidence_id,
             pointer=pointer,
             metadata=dict(metadata or {}),
+            source_id=source_id,
+            content_digest=content_digest,
         )
         op = EvidenceAdded(
-            op_id=op_id or self._new_op_id("EvidenceAdded", timestamp, {"evidence": evidence.to_dict()}),
+            op_id=op_id
+            or self._new_op_id(
+                "EvidenceAdded", timestamp, {"evidence": evidence.to_dict()}
+            ),
             replica_id=self.replica_id,
             timestamp=timestamp,
             evidence=evidence,
@@ -83,6 +165,8 @@ class Memory:
         op_id: str | None = None,
         signing_key: str | None = None,
         signing_key_id: str | None = None,
+        validity: ValidityInterval | None = None,
+        derivation_id: str | None = None,
     ) -> str:
         if (signing_key is None) != (signing_key_id is None):
             raise ValueError("signing_key and signing_key_id must be provided together.")
@@ -107,6 +191,8 @@ class Memory:
             ),
             evidence_ids=tuple(evidence_ids),
             provenance=claim_provenance,
+            validity=validity,
+            derivation_id=derivation_id,
         )
         if signing_key is not None and signing_key_id is not None:
             claim = sign_claim(claim, secret=signing_key, key_id=signing_key_id)
@@ -167,6 +253,55 @@ class Memory:
         self.store.append(op)
         return op.op_id
 
+    def add_resolution(
+        self,
+        *,
+        conflict_ref: str,
+        observed_conflict_id: str,
+        selected_claim_ids: list[str] | tuple[str, ...],
+        resolution_type: str,
+        reason: str,
+        actor_id: str,
+        rejected_claim_ids: list[str] | tuple[str, ...] = (),
+        retained_claim_ids: list[str] | tuple[str, ...] = (),
+        evidence_ids: list[str] | tuple[str, ...] = (),
+        scope: str | None = None,
+        valid_from: str | None = None,
+        valid_until: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        resolution_id: str | None = None,
+        op_id: str | None = None,
+    ) -> str:
+        timestamp = utc_now_iso()
+        resolution = ResolutionRecord(
+            resolution_id=resolution_id or new_uuid(),
+            conflict_ref=conflict_ref,
+            observed_conflict_id=observed_conflict_id,
+            selected_claim_ids=tuple(selected_claim_ids),
+            rejected_claim_ids=tuple(rejected_claim_ids),
+            retained_claim_ids=tuple(retained_claim_ids),
+            resolution_type=resolution_type,
+            reason=reason,
+            evidence_ids=tuple(evidence_ids),
+            actor_id=actor_id,
+            timestamp=timestamp,
+            scope=scope,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            metadata=dict(metadata or {}),
+        )
+        op = ResolutionAdded(
+            op_id=op_id
+            or self._new_op_id(
+                "ResolutionAdded", timestamp, {"resolution": resolution.to_dict()}
+            ),
+            replica_id=self.replica_id,
+            timestamp=timestamp,
+            resolution=resolution,
+        )
+        self.store.append(op)
+        return resolution.resolution_id
+
     def add_decision(
         self,
         *,
@@ -183,7 +318,10 @@ class Memory:
             timestamp=timestamp,
         )
         op = DecisionAdded(
-            op_id=op_id or self._new_op_id("DecisionAdded", timestamp, {"decision": decision.to_dict()}),
+            op_id=op_id
+            or self._new_op_id(
+                "DecisionAdded", timestamp, {"decision": decision.to_dict()}
+            ),
             replica_id=self.replica_id,
             timestamp=timestamp,
             decision=decision,
@@ -192,7 +330,10 @@ class Memory:
         return decision.decision_id
 
     def materialize(self, predicate_registry: PredicateRegistry | None = None) -> MemoryState:
-        return materialize(self.load_oplog(), predicate_registry=predicate_registry or self.predicate_registry)
+        return materialize(
+            self.load_oplog(),
+            predicate_registry=predicate_registry or self.predicate_registry,
+        )
 
     def merge_from(self, other_store_or_oplog: OpStore | OpLog) -> OpLog:
         if isinstance(other_store_or_oplog, OpLog):

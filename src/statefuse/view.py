@@ -13,7 +13,8 @@ from .utils import parse_utc_iso
 class Projection:
     selected_claims: dict[ClaimKey, Claim] = field(default_factory=dict)
     unresolved_conflicts: list[ConflictSet] = field(default_factory=list)
-    # Public contract: surfaced conflicts remain visible even when a resolver picks a projection-time winner.
+    # Public contract: surfaced conflicts remain visible even when a resolver picks a
+    # projection-time winner.
     surfaced_conflicts: dict[ClaimKey, ConflictSet] = field(default_factory=dict)
     explanations: dict[str, str] = field(default_factory=dict)
 
@@ -34,6 +35,59 @@ def _deterministic_claim_choice(candidates: list[Claim]) -> Claim:
         reverse=True,
     )
     return best[0]
+
+
+def _resolution_lane(
+    state: MemoryState,
+    conflict: ConflictSet,
+    scope: str | None,
+) -> tuple[str, str | None]:
+    global_lane = (conflict.conflict_ref, None)
+    if scope is None:
+        return global_lane
+    exact_lane = (conflict.conflict_ref, scope)
+    if (
+        exact_lane in state.resolutions_by_conflict_ref_and_scope
+        or exact_lane in state.lifecycle_history_by_conflict_ref_and_scope
+    ):
+        return exact_lane
+    return global_lane
+
+
+def _committed_choice(
+    state: MemoryState,
+    conflict: ConflictSet,
+    scope: str | None,
+) -> tuple[Claim | None, str | None]:
+    lane = _resolution_lane(state, conflict, scope)
+    resolution = state.effective_resolutions_by_conflict_ref_and_scope.get(lane)
+    is_effective = resolution is not None
+    if resolution is None:
+        resolution = state.active_resolutions_by_conflict_ref_and_scope.get(lane)
+        if (
+            resolution is None
+            or state.lifecycle_status_by_conflict_ref_and_scope.get(lane) != "reopened"
+        ):
+            return None, None
+
+    candidates = {claim.claim_id: claim for claim in conflict.candidates}
+    classified = (
+        set(resolution.selected_claim_ids)
+        | set(resolution.rejected_claim_ids)
+        | set(resolution.retained_claim_ids)
+    )
+    uncovered = sorted(set(candidates) - classified)
+    selected = sorted(set(candidates) & set(resolution.selected_claim_ids))
+    if not is_effective or uncovered or len(selected) != 1:
+        detail = f"Committed resolution {resolution.resolution_id} is stale/reopened"
+        if uncovered:
+            detail += f"; uncovered candidates: {', '.join(uncovered)}"
+        if len(selected) != 1:
+            detail += f"; current selected candidate count: {len(selected)}"
+        if not is_effective and not uncovered and len(selected) == 1:
+            detail += "; observed snapshot does not match classified claims"
+        return None, detail
+    return candidates[selected[0]], f"Applied committed resolution {resolution.resolution_id}"
 
 
 def build_view(
@@ -60,6 +114,22 @@ def build_view(
             continue
 
         surfaced_conflicts[key] = conflict
+        committed, committed_detail = _committed_choice(
+            state,
+            conflict,
+            constraints.scope,
+        )
+        if committed is not None:
+            selected_claims[key] = committed
+            explanations[label] = (
+                f"Resolved {conflict.conflict_id} -> {committed.claim_id}: {committed_detail}."
+            )
+            continue
+        if committed_detail is not None:
+            unresolved_conflicts.append(conflict)
+            explanations[label] = f"Unresolved {conflict.conflict_id}: {committed_detail}."
+            continue
+
         resolution = active_resolver.resolve(conflict, constraints, state)
         chosen: Claim | None = None
         if resolution.chosen_claim_id:

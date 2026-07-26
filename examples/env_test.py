@@ -25,7 +25,10 @@ def load_env_file(path: pathlib.Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Load env vars and run the real-LLM resolver demo against an OpenAI-compatible endpoint."
+        description=(
+            "Load env vars and run the real-LLM resolver demo against an "
+            "OpenAI-compatible endpoint."
+        )
     )
     parser.add_argument(
         "--env-file",
@@ -40,7 +43,8 @@ def main() -> None:
     api_key = (os.getenv("STATEFUSE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key or "your-key-here" in api_key:
         raise RuntimeError(
-            "OPENAI_API_KEY or STATEFUSE_OPENAI_API_KEY is missing or placeholder. Put a real key in your env file."
+            "OPENAI_API_KEY or STATEFUSE_OPENAI_API_KEY is missing or placeholder. "
+            "Put a real key in your env file."
         )
 
     os.environ["STATEFUSE_USE_REAL_LLM"] = "1"
