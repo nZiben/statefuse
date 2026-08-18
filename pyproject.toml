@@ -16,6 +16,16 @@ dependencies = []
 llm = ["openai>=1.0.0"]
 langgraph = ["langgraph>=0.2.0"]
 sqlite = []
+mem0 = ["mem0ai>=2.0,<3"]
+langmem = ["langmem>=0.0.30,<0.1"]
+letta = ["letta-client>=1.12,<2"]
+graphiti = ["graphiti-core>=0.29,<0.30"]
+integrations = [
+    "mem0ai>=2.0,<3",
+    "langmem>=0.0.30,<0.1",
+    "letta-client>=1.12,<2",
+    "graphiti-core>=0.29,<0.30",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

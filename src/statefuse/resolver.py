@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .conflict import ConflictSet
+from .conflict import DIRECT_CONFLICT_TYPE, ConflictSet
 from .materialize import MemoryState
-from .model import Claim
+from .model import Claim, JSONValue
 from .utils import parse_utc_iso
 
 
@@ -15,11 +15,18 @@ class ViewConstraints:
     preferred_replica_ids: tuple[str, ...] = field(default_factory=tuple)
     preferred_branch_ids: tuple[str, ...] = field(default_factory=tuple)
     metadata: dict[str, Any] = field(default_factory=dict)
+    valid_at: str | None = None
+    context: dict[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "preferred_replica_ids", tuple(self.preferred_replica_ids))
         object.__setattr__(self, "preferred_branch_ids", tuple(self.preferred_branch_ids))
         object.__setattr__(self, "metadata", dict(self.metadata))
+        if self.valid_at is not None and not isinstance(self.valid_at, str):
+            raise ValueError("ViewConstraints.valid_at must be a string or null.")
+        if not isinstance(self.context, dict):
+            raise ValueError("ViewConstraints.context must be a mapping.")
+        object.__setattr__(self, "context", dict(self.context))
 
 
 @dataclass
@@ -81,6 +88,16 @@ class HeuristicResolver:
         constraints: ViewConstraints,
         state: MemoryState,
     ) -> Resolution:
+        if (
+            conflict.conflict_type != DIRECT_CONFLICT_TYPE
+            or conflict.keys != (conflict.key,)
+            or conflict.conflict_class != "epistemic"
+            or conflict.annotations.get("applicability") == "aggregate"
+        ):
+            return Resolution(
+                chosen_claim_id=None,
+                reason="Heuristic resolver only handles direct single-key epistemic conflicts.",
+            )
         if not conflict.candidates:
             return Resolution(chosen_claim_id=None, reason="No candidates available for conflict.")
 
@@ -152,10 +169,25 @@ class HeuristicResolver:
             if evidence is None:
                 continue
             metadata = evidence.metadata
-            source_quality = str(metadata.get("source_quality", "")).strip().lower()
-            source_type = str(metadata.get("source_type", "")).strip().lower()
-            freshness = str(metadata.get("freshness", "")).strip().lower()
-            trust = str(metadata.get("trust_status", "unknown")).strip().lower()
+            source = state.sources_by_id.get(evidence.source_id or "")
+            source_metadata = source.metadata if source is not None else {}
+            source_quality = str(
+                metadata.get("source_quality", source_metadata.get("source_quality", ""))
+            ).strip().lower()
+            source_type = str(
+                metadata.get(
+                    "source_type",
+                    source.source_type
+                    if source is not None
+                    else source_metadata.get("source_type", ""),
+                )
+            ).strip().lower()
+            freshness = str(
+                metadata.get("freshness", source_metadata.get("freshness", ""))
+            ).strip().lower()
+            trust = str(
+                metadata.get("trust_status", source_metadata.get("trust_status", "unknown"))
+            ).strip().lower()
             best_quality = max(best_quality, self._QUALITY_RANK.get(source_quality, 0))
             best_source = max(best_source, self._SOURCE_RANK.get(source_type, 0))
             best_freshness = max(best_freshness, self._FRESHNESS_RANK.get(freshness, 0))
@@ -203,6 +235,19 @@ class ConservativeHeuristicResolver(HeuristicResolver):
         constraints: ViewConstraints,
         state: MemoryState,
     ) -> Resolution:
+        if (
+            conflict.conflict_type != DIRECT_CONFLICT_TYPE
+            or conflict.keys != (conflict.key,)
+            or conflict.conflict_class != "epistemic"
+            or conflict.annotations.get("applicability") == "aggregate"
+        ):
+            return Resolution(
+                chosen_claim_id=None,
+                reason=(
+                    "Conservative heuristic only handles direct single-key "
+                    "epistemic conflicts."
+                ),
+            )
         if not conflict.candidates:
             return Resolution(chosen_claim_id=None, reason="No candidates available for conflict.")
 

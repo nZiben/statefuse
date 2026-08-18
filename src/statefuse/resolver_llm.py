@@ -151,6 +151,9 @@ class LLMResolver:
                     "value": claim.value,
                     "confidence": claim.confidence,
                     "timestamp": claim.timestamp,
+                    "kind": claim.kind,
+                    "context": claim.context,
+                    "validity": claim.validity.to_dict() if claim.validity else None,
                     "evidence": evidence_summaries,
                     "provenance": claim.provenance,
                 }
@@ -159,14 +162,22 @@ class LLMResolver:
         return {
             "conflict": {
                 "conflict_id": conflict.conflict_id,
+                "conflict_type": conflict.conflict_type,
+                "conflict_class": conflict.conflict_class,
+                "conflict_subclass": conflict.conflict_subclass,
                 "key": conflict.key.to_dict(),
+                "keys": [key.to_dict() for key in conflict.keys],
                 "reason": conflict.reason,
+                "annotations": conflict.annotations,
+                "witness": conflict.witness,
             },
             "constraints": {
                 "scope": constraints.scope,
                 "preferred_replica_ids": list(constraints.preferred_replica_ids),
                 "preferred_branch_ids": list(constraints.preferred_branch_ids),
                 "metadata": constraints.metadata,
+                "valid_at": constraints.valid_at,
+                "context": constraints.context,
             },
             "candidates": candidate_payloads,
             "instructions": {

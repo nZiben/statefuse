@@ -185,11 +185,18 @@ def claim_ref_payload(
     timestamp: str,
     evidence_ids: tuple[str, ...],
     provenance: dict[str, Any],
+    kind: str = "fact",
+    context: dict[str, JSONValue] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "key": key.to_dict(),
         "value": value,
     }
+    if kind != "fact":
+        payload["kind"] = kind
+    if context:
+        payload["context"] = dict(context)
+    return payload
 
 
 def claim_ref_from_payload(payload: dict[str, Any]) -> str:
@@ -204,6 +211,8 @@ def derive_claim_ref(
     timestamp: str,
     evidence_ids: tuple[str, ...],
     provenance: dict[str, Any],
+    kind: str = "fact",
+    context: dict[str, JSONValue] | None = None,
 ) -> str:
     return claim_ref_from_payload(
         claim_ref_payload(
@@ -213,6 +222,8 @@ def derive_claim_ref(
             timestamp=timestamp,
             evidence_ids=evidence_ids,
             provenance=provenance,
+            kind=kind,
+            context=context,
         )
     )
 
@@ -229,12 +240,21 @@ class Claim:
     provenance: dict[str, Any] = field(default_factory=dict)
     validity: ValidityInterval | None = None
     derivation_id: str | None = None
+    kind: str = "fact"
+    context: dict[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("Claim.confidence must be between 0 and 1.")
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
         object.__setattr__(self, "provenance", dict(self.provenance))
+        if not isinstance(self.kind, str) or not self.kind:
+            raise ValueError("Claim.kind must be a non-empty string.")
+        if not isinstance(self.context, dict) or any(
+            not isinstance(key, str) or not key for key in self.context
+        ):
+            raise ValueError("Claim.context must be a mapping with non-empty string keys.")
+        object.__setattr__(self, "context", dict(self.context))
         if self.validity is not None and not isinstance(self.validity, ValidityInterval):
             raise ValueError("Claim.validity must be a ValidityInterval or null.")
         if self.derivation_id is not None and not isinstance(self.derivation_id, str):
@@ -250,6 +270,8 @@ class Claim:
                     timestamp=self.timestamp,
                     evidence_ids=self.evidence_ids,
                     provenance=self.provenance,
+                    kind=self.kind,
+                    context=self.context,
                 ),
             )
 
@@ -268,16 +290,23 @@ class Claim:
             payload["validity"] = self.validity.to_dict()
         if self.derivation_id is not None:
             payload["derivation_id"] = self.derivation_id
+        if self.kind != "fact":
+            payload["kind"] = self.kind
+        if self.context:
+            payload["context"] = dict(self.context)
         return payload
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> Claim:
         evidence_ids = value.get("evidence_ids", [])
         provenance = value.get("provenance", {})
+        context = value.get("context", {})
         if not isinstance(evidence_ids, list):
             raise ValueError("Claim.evidence_ids must be a list.")
         if not isinstance(provenance, dict):
             raise ValueError("Claim.provenance must be a mapping.")
+        if not isinstance(context, dict):
+            raise ValueError("Claim.context must be a mapping.")
         validity = value.get("validity")
         if validity is not None and not isinstance(validity, dict):
             raise ValueError("Claim.validity must be an object or null.")
@@ -292,6 +321,8 @@ class Claim:
             provenance=dict(provenance),
             validity=ValidityInterval.from_dict(validity) if validity is not None else None,
             derivation_id=_optional_string(value, "derivation_id"),
+            kind=value.get("kind", "fact"),
+            context=dict(context),
         )
 
 
@@ -387,6 +418,7 @@ class ResolutionRecord:
     valid_from: str | None = None
     valid_until: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    outcome: str = "select"
 
     def __post_init__(self) -> None:
         groups = {
@@ -419,6 +451,14 @@ class ResolutionRecord:
             raise ValueError("ResolutionRecord.timestamp is required.")
         if self.scope is not None and not isinstance(self.scope, str):
             raise ValueError("ResolutionRecord.scope must be a string or null.")
+        if self.outcome not in {"select", "replace", "preserve", "merge", "abstain"}:
+            raise ValueError(f"Unknown resolution outcome: {self.outcome}")
+        if self.outcome in {"preserve", "abstain"} and (selected or rejected):
+            raise ValueError(
+                f"Resolution outcome {self.outcome!r} cannot select or reject claims."
+            )
+        if self.outcome == "merge" and len(selected) != 1:
+            raise ValueError("Resolution outcome 'merge' requires one merged claim.")
         parse_utc_iso(self.timestamp)
         ValidityInterval(self.valid_from, self.valid_until)
 
@@ -443,6 +483,8 @@ class ResolutionRecord:
             payload["valid_from"] = self.valid_from
         if self.valid_until is not None:
             payload["valid_until"] = self.valid_until
+        if self.outcome != "select":
+            payload["outcome"] = self.outcome
         return payload
 
     @classmethod
@@ -473,6 +515,7 @@ class ResolutionRecord:
             valid_from=_optional_string(value, "valid_from"),
             valid_until=_optional_string(value, "valid_until"),
             metadata=dict(metadata),
+            outcome=str(value.get("outcome", "select")),
         )
 
 

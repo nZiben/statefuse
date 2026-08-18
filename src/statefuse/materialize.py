@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .conflict import ConflictSet, PredicateRegistry, derive_conflict_id, detect_conflicts
+from .conflict import (
+    DIRECT_CONFLICT_TYPE,
+    ConflictDetectionContext,
+    ConflictDetector,
+    ConflictSet,
+    PredicateRegistry,
+    claim_applies,
+    derive_conflict_id,
+    run_conflict_detectors,
+)
 from .model import (
     Claim,
     ClaimKey,
@@ -12,6 +22,7 @@ from .model import (
     Decision,
     Derivation,
     Evidence,
+    JSONValue,
     ResolutionRecord,
     Source,
 )
@@ -78,6 +89,96 @@ class MemoryState:
     )
     conflicts_by_id: dict[str, ConflictSet] = field(default_factory=dict, repr=False)
     conflicts_by_ref: dict[str, ConflictSet] = field(default_factory=dict, repr=False)
+    conflicts_by_key: dict[ClaimKey, tuple[ConflictSet, ...]] = field(default_factory=dict)
+    inapplicable_claim_ids: set[str] = field(default_factory=set, repr=False)
+    predicate_registry: PredicateRegistry = field(
+        default_factory=PredicateRegistry, repr=False, compare=False
+    )
+
+    def find_conflicts(
+        self,
+        *,
+        conflict_id: str | None = None,
+        conflict_ref: str | None = None,
+        conflict_type: str | None = None,
+        conflict_class: str | None = None,
+        conflict_subclass: str | None = None,
+        detector_id: str | None = None,
+        claim_id: str | None = None,
+        source_id: str | None = None,
+        source_type: str | None = None,
+        key: ClaimKey | None = None,
+        namespace: str | None = None,
+        context: Mapping[str, JSONValue] | None = None,
+        status: str | None = None,
+        scope: str | None = None,
+    ) -> tuple[ConflictSet, ...]:
+        matches: list[ConflictSet] = []
+        for conflict in self.conflicts:
+            if conflict_id is not None and conflict.conflict_id != conflict_id:
+                continue
+            if conflict_ref is not None and conflict.conflict_ref != conflict_ref:
+                continue
+            if conflict_type is not None and conflict.conflict_type != conflict_type:
+                continue
+            if conflict_class is not None and conflict.conflict_class != conflict_class:
+                continue
+            if conflict_subclass is not None and conflict.conflict_subclass != conflict_subclass:
+                continue
+            if detector_id is not None and conflict.detector_id != detector_id:
+                continue
+            if claim_id is not None and all(
+                claim.claim_id != claim_id for claim in conflict.candidates
+            ):
+                continue
+            if key is not None and key not in conflict.keys:
+                continue
+            if namespace is not None and all(
+                related_key.namespace != namespace for related_key in conflict.keys
+            ):
+                continue
+            candidate_source_ids = {
+                evidence.source_id
+                for claim in conflict.candidates
+                for evidence_id in claim.evidence_ids
+                if (evidence := self.evidence_by_id.get(evidence_id)) is not None
+                and evidence.source_id is not None
+            }
+            if source_id is not None and source_id not in candidate_source_ids:
+                continue
+            if source_type is not None and all(
+                self.sources_by_id.get(candidate_source_id) is None
+                or self.sources_by_id[candidate_source_id].source_type != source_type
+                for candidate_source_id in candidate_source_ids
+            ):
+                continue
+            if context and not _conflict_matches_context(conflict, context):
+                continue
+            lane = (conflict.conflict_ref, scope)
+            if scope is not None and lane not in self.lifecycle_status_by_conflict_ref_and_scope:
+                lane = (conflict.conflict_ref, None)
+            current_status = self.lifecycle_status_by_conflict_ref_and_scope.get(lane, "open")
+            if status is not None and current_status != status:
+                continue
+            matches.append(conflict)
+        return tuple(sorted(matches, key=lambda item: item.conflict_id))
+
+
+def _conflict_matches_context(
+    conflict: ConflictSet, context: Mapping[str, JSONValue]
+) -> bool:
+    pairs = conflict.witness.get("incompatible_pairs")
+    if conflict.conflict_type == DIRECT_CONFLICT_TYPE and isinstance(pairs, list):
+        return any(
+            isinstance(pair, dict)
+            and isinstance(pair.get("context"), dict)
+            and all(pair["context"].get(name, value) == value for name, value in context.items())
+            for pair in pairs
+        )
+    return all(
+        all(claim.context.get(name, value) == value for name, value in context.items())
+        for claim in conflict.candidates
+    )
 
 
 def _sort_decisions(decisions: list[Decision]) -> list[Decision]:
@@ -171,6 +272,7 @@ def _fold_lifecycle(
     resolutions_by_lane: dict[tuple[str, str | None], tuple[ResolutionRecord, ...]],
     events_by_lane: dict[tuple[str, str | None], tuple[ConflictLifecycleEvent, ...]],
     conflicts_by_ref: dict[str, ConflictSet],
+    valid_at: str | None = None,
 ) -> tuple[
     dict[tuple[str, str | None], ResolutionRecord],
     dict[tuple[str, str | None], ResolutionRecord],
@@ -185,6 +287,7 @@ def _fold_lifecycle(
         timeline.extend(
             (_timestamp(item.timestamp), 0, item.resolution_id, item)
             for item in resolutions_by_lane.get(lane, ())
+            if _resolution_applies(item, valid_at)
         )
         timeline.extend(
             (_timestamp(item.timestamp), 1, item.event_id, item)
@@ -195,7 +298,9 @@ def _fold_lifecycle(
                 resolution = item
                 assert isinstance(resolution, ResolutionRecord)
                 active[lane] = resolution
-                statuses[lane] = "resolved"
+                statuses[lane] = (
+                    "deferred" if resolution.outcome == "abstain" else "resolved"
+                )
                 continue
 
             event = item
@@ -210,9 +315,14 @@ def _fold_lifecycle(
                 or resolution.conflict_ref != event.conflict_ref
                 or resolution.scope != event.scope
                 or resolution.observed_conflict_id != event.observed_conflict_id
+                or not _resolution_applies(resolution, valid_at)
             ):
                 active.pop(lane, None)
                 statuses[lane] = "open"
+                continue
+            if resolution.outcome == "abstain":
+                active[lane] = resolution
+                statuses[lane] = "deferred"
                 continue
             active[lane] = resolution
             statuses[lane] = "resolved"
@@ -234,9 +344,27 @@ def _fold_lifecycle(
             )
             selected = current_ids & set(resolution.selected_claim_ids)
             observed_matches = resolution.observed_conflict_id == derive_conflict_id(
-                conflict.key, classified
+                conflict.key,
+                classified,
+                conflict_type=conflict.conflict_type,
+                keys=conflict.keys,
+                detector_id=conflict.detector_id,
             )
-            if observed_matches and current_ids <= classified and len(selected) == 1:
+            if resolution.outcome == "abstain":
+                statuses[lane] = (
+                    "deferred"
+                    if observed_matches and current_ids <= classified
+                    else "reopened"
+                )
+                continue
+            preserves = (
+                resolution.outcome == "preserve"
+                and not resolution.selected_claim_ids
+                and not resolution.rejected_claim_ids
+                and current_ids <= set(resolution.retained_claim_ids)
+            )
+            selects = resolution.outcome in {"select", "replace", "merge"} and len(selected) == 1
+            if observed_matches and current_ids <= classified and (preserves or selects):
                 effective[lane] = resolution
                 statuses[lane] = "resolved"
             else:
@@ -245,8 +373,28 @@ def _fold_lifecycle(
     return active, effective, statuses
 
 
-def materialize(oplog: OpLog, predicate_registry: PredicateRegistry | None = None) -> MemoryState:
+def _resolution_applies(resolution: ResolutionRecord, valid_at: str | None) -> bool:
+    if valid_at is None:
+        return True
+    instant = parse_utc_iso(valid_at)
+    valid_from = parse_utc_iso(resolution.valid_from) if resolution.valid_from else None
+    valid_until = parse_utc_iso(resolution.valid_until) if resolution.valid_until else None
+    return (valid_from is None or valid_from <= instant) and (
+        valid_until is None or instant < valid_until
+    )
+
+
+def materialize(
+    oplog: OpLog,
+    predicate_registry: PredicateRegistry | None = None,
+    *,
+    conflict_detectors: Sequence[ConflictDetector] = (),
+    valid_at: str | None = None,
+    context: Mapping[str, JSONValue] | None = None,
+) -> MemoryState:
     registry = predicate_registry or PredicateRegistry()
+    if valid_at is not None:
+        parse_utc_iso(valid_at)
 
     sources_by_id: dict[str, Source] = {}
     evidence_by_id: dict[str, Evidence] = {}
@@ -344,8 +492,12 @@ def materialize(oplog: OpLog, predicate_registry: PredicateRegistry | None = Non
     for claim_ref in retractions_by_target_ref:
         inactive_claim_ids.update(claim_ids_by_ref_raw.get(claim_ref, []))
     active_claims_by_key_raw: defaultdict[ClaimKey, list[Claim]] = defaultdict(list)
+    inapplicable_claim_ids: set[str] = set()
     for claim_id, claim in claims_by_id.items():
         if claim_id in inactive_claim_ids:
+            continue
+        if not claim_applies(claim, valid_at=valid_at, context=context):
+            inapplicable_claim_ids.add(claim_id)
             continue
         active_claims_by_key_raw[claim.key].append(claim)
 
@@ -364,10 +516,31 @@ def materialize(oplog: OpLog, predicate_registry: PredicateRegistry | None = Non
     for claim_ref in sorted(retractions_by_superseder_ref):
         retractions_by_superseder_ref[claim_ref].sort(key=lambda item: (item.timestamp, item.op_id))
 
-    conflicts = detect_conflicts(active_claims_by_key, registry)
+    active_decisions = _sort_decisions(list(decisions_by_id.values()))
+    detection_context = ConflictDetectionContext(
+        active_claims_by_key=active_claims_by_key,
+        claims_by_id={
+            claim.claim_id: claim
+            for claims in active_claims_by_key.values()
+            for claim in claims
+        },
+        evidence_by_id=evidence_by_id,
+        sources_by_id=sources_by_id,
+        derivations_by_id=derivations_by_id,
+        active_decisions=tuple(active_decisions),
+        predicate_registry=registry,
+    )
+    conflicts = run_conflict_detectors(detection_context, conflict_detectors)
     conflicts_by_id = {conflict.conflict_id: conflict for conflict in conflicts}
     conflicts_by_ref = {conflict.conflict_ref: conflict for conflict in conflicts}
-    active_decisions = _sort_decisions(list(decisions_by_id.values()))
+    conflicts_by_key_raw: defaultdict[ClaimKey, list[ConflictSet]] = defaultdict(list)
+    for conflict in conflicts:
+        for related_key in conflict.keys:
+            conflicts_by_key_raw[related_key].append(conflict)
+    conflicts_by_key = {
+        key: tuple(sorted(items, key=lambda conflict: conflict.conflict_id))
+        for key, items in sorted(conflicts_by_key_raw.items())
+    }
     claim_ids_by_ref = {
         claim_ref: tuple(sorted(claim_ids))
         for claim_ref, claim_ids in claim_ids_by_ref_raw.items()
@@ -383,6 +556,7 @@ def materialize(oplog: OpLog, predicate_registry: PredicateRegistry | None = Non
         resolutions_by_lane=resolutions_by_lane,
         events_by_lane=lifecycle_history_by_lane,
         conflicts_by_ref=conflicts_by_ref,
+        valid_at=valid_at,
     )
 
     return MemoryState(
@@ -398,6 +572,7 @@ def materialize(oplog: OpLog, predicate_registry: PredicateRegistry | None = Non
         retractions_by_superseder=dict(retractions_by_superseder),
         retractions_by_superseder_ref=dict(retractions_by_superseder_ref),
         inactive_claim_ids=inactive_claim_ids,
+        inapplicable_claim_ids=inapplicable_claim_ids,
         sources_by_id={key: sources_by_id[key] for key in sorted(sources_by_id)},
         derivations_by_id={key: derivations_by_id[key] for key in sorted(derivations_by_id)},
         resolutions_by_id={key: resolutions_by_id[key] for key in sorted(resolutions_by_id)},
@@ -413,4 +588,6 @@ def materialize(oplog: OpLog, predicate_registry: PredicateRegistry | None = Non
         lifecycle_status_by_conflict_ref_and_scope=lifecycle_statuses,
         conflicts_by_id=conflicts_by_id,
         conflicts_by_ref=conflicts_by_ref,
+        conflicts_by_key=conflicts_by_key,
+        predicate_registry=registry,
     )

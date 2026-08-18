@@ -1,51 +1,51 @@
 # StateFuse
 
-StateFuse is a lightweight Python library for deterministic, conflict-preserving agent memory built on standard OpSet/CRDT principles.
+Deterministic, conflict-preserving memory for AI agents.
 
-## Overview
+StateFuse stores memory as an immutable operation log that replicas can merge without silently
+overwriting competing claims. Applications get a deterministic view of active claims, provenance,
+conflicts, retractions, and committed resolutions.
 
-StateFuse gives agent systems a mergeable memory substrate with:
+## Why StateFuse
 
-- immutable operation history
-- canonical source, evidence, and derivation records
-- temporal claim validity without changing assertion timestamps
-- explicit surfaced conflicts instead of silent overwrite
-- append-only conflict lifecycle and committed, scope-aware resolutions
-- exact and semantic correction handles via `claim_id` and `claim_ref`
-- deterministic materialization and projection
-- optional authenticated merge checks and bounded compaction helpers
+- Merge memory across agents and replicas deterministically.
+- Preserve sources, evidence, derivations, corrections, and history.
+- Surface conflicting claims instead of choosing one silently.
+- Resolve conflicts explicitly and keep stale resolutions from applying to new candidates.
+- Use external memory systems for retrieval without making them the source of truth.
 
-The project focuses on the memory contract exposed to applications rather than on inventing a new CRDT join.
+## Installation
 
-## Install
+StateFuse requires Python 3.10 or later.
 
 ```bash
 python3 -m pip install -e .
 ```
 
-For LLM-backed resolution support:
+Install optional LLM-backed resolution support with:
 
 ```bash
 python3 -m pip install -e ".[llm]"
 ```
 
-## Quick Start
+## Quick start
 
 ```python
 from statefuse import Memory
 
-mem = Memory(replica_id="agent-a")
-source_id = mem.add_source(
+memory = Memory(replica_id="agent-a")
+
+source_id = memory.add_source(
     source_type="user_message",
     actor_id="user-1",
     message_id="message-1",
 )
-evidence_id = mem.add_evidence(
+evidence_id = memory.add_evidence(
     pointer="message://message-1",
     content="The launch deadline is 2026-04-10.",
     source_id=source_id,
 )
-mem.add_claim(
+memory.add_claim(
     namespace="project",
     subject="launch",
     predicate="deadline",
@@ -55,59 +55,61 @@ mem.add_claim(
 )
 ```
 
-For deterministic or content-addressed deployments:
+See [`examples/`](examples/) for branching, merging, and conflict-resolution flows.
+
+For context/validity-aware detection, taxonomy annotations, multi-key domain detectors, and
+preserve/abstain outcomes, see [Taxonomy-aware conflicts](docs/conflict-taxonomy.md).
+
+## Adapters
+
+StateFuse can project canonical memory into external retrieval systems. These systems remain
+disposable indexes: search results are hydrated against current StateFuse state before use, so
+stale external text cannot reactivate a retracted claim or hide a conflict.
+
+| Adapter | Install extra | Interface |
+| --- | --- | --- |
+| Mem0 | `statefuse[mem0]` | sync and async |
+| LangMem / LangGraph Store | `statefuse[langmem]` | sync and async |
+| Letta archive passages | `statefuse[letta]` | sync |
+| Graphiti | `statefuse[graphiti]` | async |
 
 ```python
-from statefuse import Memory
+from mem0 import Memory as Mem0Memory
+from statefuse.integrations import (
+    InMemoryExternalReferenceStore,
+    Mem0Adapter,
+    ProjectionService,
+    SearchRequest,
+)
 
-mem = Memory(replica_id="agent-a", op_id_mode="content-addressed")
+service = ProjectionService(
+    memory,
+    Mem0Adapter(Mem0Memory()),
+    InMemoryExternalReferenceStore(),
+)
+
+report = service.synchronize("project")
+context = service.search(SearchRequest("launch deadline", "project"))
 ```
 
-Strict `merge()` keeps fail-fast behavior on invalid `op_id` payload collisions. Use `merge_checked()` when a sync pipeline should quarantine bad collisions instead of failing the whole merge.
+Synchronize only after the StateFuse operation commits. Adapter failures are returned in
+`report.failed`; they do not roll back canonical memory.
 
-## Conflict lifecycle
-
-A derived conflict has two identities: `conflict_id` names the exact candidate snapshot, while `conflict_ref` remains stable as candidates arrive or are retracted. A `ResolutionRecord` is an explicit application or human commit; the existing resolver result remains an ephemeral projection-time recommendation.
-
-`build_view()` applies a committed resolution only in its matching scope and only while every current candidate is covered. The selected claim changes in that view, but the conflict remains in `surfaced_conflicts`. An uncovered candidate makes the resolution stale/reopened instead of inheriting it silently. Sources, evidence, claim validity, derivations, resolutions, and lifecycle events all remain immutable operations in the canonical log.
-
-Until StateFuse has a signed operation envelope, `merge_checked_authenticated(..., require_signed=True)` quarantines resolution and lifecycle operations rather than trusting unsigned authority changes.
+- [Adapter architecture](docs/integrations/architecture.md)
+- [Included adapters](docs/integrations/connectors.md)
+- [Build a custom adapter](docs/integrations/custom-adapter.md)
+- [Test an adapter](docs/integrations/testing.md)
 
 ## Development
 
-Install dev dependencies:
-
 ```bash
 python3 -m pip install -e . pytest ruff build
-```
-
-Run local checks:
-
-```bash
 ruff check .
 python3 -m pytest -q
 python3 -m build
 ```
 
-## LLM Smoke Check
-
-If you are using an OpenAI-compatible endpoint, you can validate the client configuration before running demos:
-
-```bash
-cp .env.test.example .env.test
-python3 scripts/llm_endpoint_smoke.py --env-file .env.test
-```
-
-## Examples
-
-- `examples/01_basic_ops.py`
-- `examples/02_branch_diverge_merge.py`
-- `examples/03_llm_resolver_demo.py`
-- `examples/env_test.py`
-
 ## Citation
-
-If you use StateFuse, please cite the preprint:
 
 ```bibtex
 @misc{volkov2026statefuse,

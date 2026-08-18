@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from .auth import sign_claim
-from .conflict import PredicateRegistry
+from .conflict import ConflictDetector, ConflictSet, PredicateRegistry
 from .materialize import MemoryState, materialize
 from .merge import merge
 from .model import (
     Claim,
     ClaimKey,
     Decision,
+    Derivation,
     Evidence,
     JSONValue,
     ResolutionRecord,
@@ -23,6 +25,7 @@ from .ops import (
     ClaimAdded,
     ClaimRetracted,
     DecisionAdded,
+    DerivationAdded,
     EvidenceAdded,
     ResolutionAdded,
     SourceAdded,
@@ -46,6 +49,7 @@ class Memory:
         *,
         op_id_mode: OpIdMode = "uuid4",
         predicate_registry: PredicateRegistry | None = None,
+        conflict_detectors: Sequence[ConflictDetector] = (),
     ) -> None:
         self.store = store or InMemoryStore()
         self.replica_id = replica_id
@@ -53,6 +57,7 @@ class Memory:
             raise ValueError("op_id_mode must be 'uuid4' or 'content-addressed'.")
         self.op_id_mode = op_id_mode
         self.predicate_registry = predicate_registry or PredicateRegistry()
+        self.conflict_detectors = tuple(conflict_detectors)
 
     def append_op(self, op: AnyOp) -> bool:
         return self.store.append(op)
@@ -167,6 +172,8 @@ class Memory:
         signing_key_id: str | None = None,
         validity: ValidityInterval | None = None,
         derivation_id: str | None = None,
+        kind: str = "fact",
+        context: dict[str, JSONValue] | None = None,
     ) -> str:
         if (signing_key is None) != (signing_key_id is None):
             raise ValueError("signing_key and signing_key_id must be provided together.")
@@ -188,11 +195,15 @@ class Memory:
                 timestamp=timestamp,
                 evidence_ids=tuple(evidence_ids),
                 provenance=claim_provenance,
+                kind=kind,
+                context=context,
             ),
             evidence_ids=tuple(evidence_ids),
             provenance=claim_provenance,
             validity=validity,
             derivation_id=derivation_id,
+            kind=kind,
+            context=dict(context or {}),
         )
         if signing_key is not None and signing_key_id is not None:
             claim = sign_claim(claim, secret=signing_key, key_id=signing_key_id)
@@ -269,6 +280,7 @@ class Memory:
         valid_from: str | None = None,
         valid_until: str | None = None,
         metadata: dict[str, Any] | None = None,
+        outcome: str = "select",
         resolution_id: str | None = None,
         op_id: str | None = None,
     ) -> str:
@@ -289,6 +301,7 @@ class Memory:
             valid_from=valid_from,
             valid_until=valid_until,
             metadata=dict(metadata or {}),
+            outcome=outcome,
         )
         op = ResolutionAdded(
             op_id=op_id
@@ -329,11 +342,71 @@ class Memory:
         self.store.append(op)
         return decision.decision_id
 
-    def materialize(self, predicate_registry: PredicateRegistry | None = None) -> MemoryState:
+    def add_derivation(
+        self,
+        *,
+        rule_id: str,
+        input_claim_ids: list[str] | tuple[str, ...],
+        output_claim_ids: list[str] | tuple[str, ...],
+        engine: str,
+        explanation: str,
+        confidence: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        derivation_id: str | None = None,
+        op_id: str | None = None,
+    ) -> str:
+        timestamp = utc_now_iso()
+        derivation = Derivation(
+            derivation_id=derivation_id or new_uuid(),
+            rule_id=rule_id,
+            input_claim_ids=tuple(input_claim_ids),
+            output_claim_ids=tuple(output_claim_ids),
+            engine=engine,
+            explanation=explanation,
+            timestamp=timestamp,
+            confidence=confidence,
+            metadata=dict(metadata or {}),
+        )
+        op = DerivationAdded(
+            op_id=op_id
+            or self._new_op_id(
+                "DerivationAdded", timestamp, {"derivation": derivation.to_dict()}
+            ),
+            replica_id=self.replica_id,
+            timestamp=timestamp,
+            derivation=derivation,
+        )
+        self.store.append(op)
+        return derivation.derivation_id
+
+    def materialize(
+        self,
+        predicate_registry: PredicateRegistry | None = None,
+        *,
+        conflict_detectors: Sequence[ConflictDetector] | None = None,
+        valid_at: str | None = None,
+        context: dict[str, JSONValue] | None = None,
+    ) -> MemoryState:
         return materialize(
             self.load_oplog(),
             predicate_registry=predicate_registry or self.predicate_registry,
+            conflict_detectors=(
+                self.conflict_detectors if conflict_detectors is None else conflict_detectors
+            ),
+            valid_at=valid_at,
+            context=context,
         )
+
+    def find_conflicts(
+        self,
+        *,
+        valid_at: str | None = None,
+        applicability_context: dict[str, JSONValue] | None = None,
+        **filters: Any,
+    ) -> tuple[ConflictSet, ...]:
+        return self.materialize(
+            valid_at=valid_at, context=applicability_context
+        ).find_conflicts(**filters)
 
     def merge_from(self, other_store_or_oplog: OpStore | OpLog) -> OpLog:
         if isinstance(other_store_or_oplog, OpLog):
@@ -353,7 +426,11 @@ class Memory:
         resolver: Resolver | None = None,
         predicate_registry: PredicateRegistry | None = None,
     ) -> Projection:
-        state = self.materialize(predicate_registry=predicate_registry)
+        state = self.materialize(
+            predicate_registry=predicate_registry,
+            valid_at=constraints.valid_at,
+            context=constraints.context,
+        )
         return build_projection(
             state=state,
             constraints=constraints,
@@ -371,6 +448,8 @@ class Memory:
         timestamp: str,
         evidence_ids: list[str] | tuple[str, ...],
         provenance: dict[str, Any] | None = None,
+        kind: str = "fact",
+        context: dict[str, JSONValue] | None = None,
     ) -> str:
         claim_provenance = dict(provenance or {})
         claim_provenance.setdefault("replica_id", self.replica_id)
@@ -382,6 +461,8 @@ class Memory:
             timestamp=timestamp,
             evidence_ids=tuple(evidence_ids),
             provenance=claim_provenance,
+            kind=kind,
+            context=context,
         )
 
     def _new_op_id(self, op_type: str, timestamp: str, payload: dict[str, Any]) -> str:

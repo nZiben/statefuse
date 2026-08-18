@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .conflict import ConflictSet
+from .conflict import DIRECT_CONFLICT_TYPE, ConflictSet
 from .materialize import MemoryState
 from .model import Claim, ClaimKey
 from .resolver import HeuristicResolver, Resolver, ViewConstraints
@@ -17,6 +17,8 @@ class Projection:
     # projection-time winner.
     surfaced_conflicts: dict[ClaimKey, ConflictSet] = field(default_factory=dict)
     explanations: dict[str, str] = field(default_factory=dict)
+    surfaced_findings: dict[str, ConflictSet] = field(default_factory=dict)
+    compatible_claims: dict[ClaimKey, tuple[Claim, ...]] = field(default_factory=dict)
 
 
 def _key_label(key: ClaimKey) -> str:
@@ -58,17 +60,22 @@ def _committed_choice(
     state: MemoryState,
     conflict: ConflictSet,
     scope: str | None,
-) -> tuple[Claim | None, str | None]:
+) -> tuple[Claim | None, str | None, bool]:
     lane = _resolution_lane(state, conflict, scope)
     resolution = state.effective_resolutions_by_conflict_ref_and_scope.get(lane)
     is_effective = resolution is not None
     if resolution is None:
         resolution = state.active_resolutions_by_conflict_ref_and_scope.get(lane)
-        if (
-            resolution is None
-            or state.lifecycle_status_by_conflict_ref_and_scope.get(lane) != "reopened"
-        ):
-            return None, None
+        lane_status = state.lifecycle_status_by_conflict_ref_and_scope.get(lane)
+        if lane_status == "deferred":
+            detail = (
+                f"Committed abstention {resolution.resolution_id}"
+                if resolution is not None and resolution.outcome == "abstain"
+                else "Conflict resolution is deferred"
+            )
+            return None, detail, False
+        if resolution is None or lane_status != "reopened":
+            return None, None, False
 
     candidates = {claim.claim_id: claim for claim in conflict.candidates}
     classified = (
@@ -78,6 +85,18 @@ def _committed_choice(
     )
     uncovered = sorted(set(candidates) - classified)
     selected = sorted(set(candidates) & set(resolution.selected_claim_ids))
+    if is_effective and resolution.outcome == "preserve":
+        return (
+            None,
+            f"Applied committed {resolution.outcome} resolution {resolution.resolution_id}",
+            True,
+        )
+    if is_effective and len(selected) == 1:
+        return (
+            candidates[selected[0]],
+            f"Applied committed {resolution.outcome} resolution {resolution.resolution_id}",
+            True,
+        )
     if not is_effective or uncovered or len(selected) != 1:
         detail = f"Committed resolution {resolution.resolution_id} is stale/reopened"
         if uncovered:
@@ -86,8 +105,16 @@ def _committed_choice(
             detail += f"; current selected candidate count: {len(selected)}"
         if not is_effective and not uncovered and len(selected) == 1:
             detail += "; observed snapshot does not match classified claims"
-        return None, detail
-    return candidates[selected[0]], f"Applied committed resolution {resolution.resolution_id}"
+        return None, detail, False
+    return None, None, False
+
+
+def _is_selectable_conflict(conflict: ConflictSet) -> bool:
+    return (
+        conflict.conflict_type == DIRECT_CONFLICT_TYPE
+        and conflict.keys == (conflict.key,)
+        and all(claim.key == conflict.key for claim in conflict.candidates)
+    )
 
 
 def build_view(
@@ -96,34 +123,62 @@ def build_view(
     resolver: Resolver | None = None,
 ) -> Projection:
     active_resolver = resolver or HeuristicResolver()
-    conflicts_by_key = {conflict.key: conflict for conflict in state.conflicts}
+    conflicts_by_key = {
+        key: tuple(conflict for conflict in conflicts if _is_selectable_conflict(conflict))
+        for key, conflicts in state.conflicts_by_key.items()
+    }
 
     selected_claims: dict[ClaimKey, Claim] = {}
     unresolved_conflicts: list[ConflictSet] = []
     surfaced_conflicts: dict[ClaimKey, ConflictSet] = {}
+    surfaced_findings = {conflict.conflict_id: conflict for conflict in state.conflicts}
+    compatible_claims: dict[ClaimKey, tuple[Claim, ...]] = {}
     explanations: dict[str, str] = {}
+    handled_conflict_ids: set[str] = set()
 
     for key in sorted(state.active_claims_by_key):
         claims = state.active_claims_by_key[key]
         label = _key_label(key)
-        conflict = conflicts_by_key.get(key)
-        if conflict is None:
+        key_conflicts = conflicts_by_key.get(key, ())
+        if not key_conflicts:
+            if len(claims) > 1 and any(
+                not state.predicate_registry.values_equal(
+                    key.predicate, claim.value, claims[0].value
+                )
+                for claim in claims[1:]
+            ):
+                compatible_claims[key] = tuple(claims)
+                explanations[label] = (
+                    "Compatible context, time, or multi-valued alternatives; "
+                    "no single claim selected."
+                )
+                continue
             chosen = _deterministic_claim_choice(claims)
             selected_claims[key] = chosen
             explanations[label] = f"No conflict. Selected {chosen.claim_id} deterministically."
             continue
 
+        conflict = key_conflicts[0]
+        handled_conflict_ids.add(conflict.conflict_id)
         surfaced_conflicts[key] = conflict
-        committed, committed_detail = _committed_choice(
+        candidate_ids = {claim.claim_id for claim in conflict.candidates}
+        compatible = tuple(claim for claim in claims if claim.claim_id not in candidate_ids)
+        if compatible:
+            compatible_claims[key] = compatible
+        committed, committed_detail, committed_applied = _committed_choice(
             state,
             conflict,
             constraints.scope,
         )
-        if committed is not None:
-            selected_claims[key] = committed
-            explanations[label] = (
-                f"Resolved {conflict.conflict_id} -> {committed.claim_id}: {committed_detail}."
-            )
+        if committed_applied:
+            if committed is not None:
+                selected_claims[key] = committed
+                explanations[label] = (
+                    f"Resolved {conflict.conflict_id} -> {committed.claim_id}: "
+                    f"{committed_detail}."
+                )
+            else:
+                explanations[label] = f"Resolved {conflict.conflict_id}: {committed_detail}."
             continue
         if committed_detail is not None:
             unresolved_conflicts.append(conflict)
@@ -153,10 +208,53 @@ def build_view(
             detail += f" | raw_response={raw_response}"
         explanations[label] = detail
 
-    unresolved_conflicts.sort(key=lambda conflict: (conflict.key, conflict.conflict_id))
+    for conflict in state.conflicts:
+        if conflict.conflict_id in handled_conflict_ids:
+            continue
+        committed, committed_detail, committed_applied = _committed_choice(
+            state, conflict, constraints.scope
+        )
+        label = f"conflict:{conflict.conflict_id}"
+        if committed_applied:
+            if committed is not None:
+                lane = _resolution_lane(state, conflict, constraints.scope)
+                resolution = state.effective_resolutions_by_conflict_ref_and_scope[lane]
+                for claim in conflict.candidates:
+                    if claim.claim_id not in resolution.rejected_claim_ids:
+                        continue
+                    if selected_claims.get(claim.key) == claim:
+                        selected_claims.pop(claim.key)
+                        explanations[_key_label(claim.key)] = (
+                            f"Excluded {claim.claim_id} by committed "
+                            f"{resolution.outcome} resolution {resolution.resolution_id}."
+                        )
+                    alternatives = compatible_claims.get(claim.key)
+                    if alternatives and claim in alternatives:
+                        remaining = tuple(item for item in alternatives if item != claim)
+                        if len(remaining) == 1:
+                            compatible_claims.pop(claim.key)
+                            selected_claims[claim.key] = remaining[0]
+                        elif remaining:
+                            compatible_claims[claim.key] = remaining
+                        else:
+                            compatible_claims.pop(claim.key)
+            explanations[label] = f"Resolved {conflict.conflict_id}: {committed_detail}."
+            continue
+        unresolved_conflicts.append(conflict)
+        explanations[label] = (
+            f"Unresolved {conflict.conflict_id}: "
+            f"{committed_detail or 'no committed resolution for this conflict type'}."
+        )
+
+    unresolved_conflicts = sorted(
+        {conflict.conflict_id: conflict for conflict in unresolved_conflicts}.values(),
+        key=lambda conflict: (conflict.key, conflict.conflict_id),
+    )
     return Projection(
         selected_claims=selected_claims,
         unresolved_conflicts=unresolved_conflicts,
         surfaced_conflicts=surfaced_conflicts,
+        surfaced_findings=surfaced_findings,
         explanations=explanations,
+        compatible_claims=compatible_claims,
     )
