@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "statefuse"
-version = "0.2.0"
+version = "0.3.0"
 description = "Mergeable CRDT op-log memory for AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
