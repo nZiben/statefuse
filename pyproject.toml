@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statefuse"
+version = "0.3.0"
+description = "Mergeable CRDT op-log memory for AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "StateFuse Contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["openai>=1.0.0"]
+langgraph = ["langgraph>=0.2.0"]
+sqlite = []
+mem0 = ["mem0ai>=2.0,<3"]
+langmem = ["langmem>=0.0.30,<0.1"]
+letta = ["letta-client>=1.12,<2"]
+graphiti = ["graphiti-core>=0.29,<0.30"]
+integrations = [
+    "mem0ai>=2.0,<3",
+    "langmem>=0.0.30,<0.1",
+    "letta-client>=1.12,<2",
+    "graphiti-core>=0.29,<0.30",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
