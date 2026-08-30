@@ -153,7 +153,7 @@ __all__ = [
     "merge_checked_authenticated",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def __getattr__(name: str):  # pragma: no cover - trivial dynamic import
