@@ -5,6 +5,11 @@ from pathlib import Path
 import pytest
 
 from statefuse import (
+    Claim,
+    ClaimAdded,
+    ClaimKey,
+    Evidence,
+    EvidenceAdded,
     InMemoryStore,
     JsonlStore,
     Memory,
@@ -256,10 +261,30 @@ def test_paginated_sync_keeps_a_logical_batch_atomic(tmp_path, store_type) -> No
     )
     sender = Memory(store=sender_store, replica_id="sender")
     receiver = Memory(replica_id="receiver")
-    from tests.test_atomic_batches import _batch
+    evidence = EvidenceAdded(
+        op_id="op-evidence",
+        replica_id="sender",
+        timestamp="2026-03-01T00:00:00.000000Z",
+        evidence=Evidence(evidence_id="evidence-1", pointer="doc://1"),
+    )
+    claim = ClaimAdded(
+        op_id="op-claim",
+        replica_id="sender",
+        timestamp="2026-03-01T00:00:01.000000Z",
+        claim=Claim(
+            claim_id="claim-1",
+            key=ClaimKey("project", "deadline", "date"),
+            value="May 12",
+            confidence=0.8,
+            timestamp="2026-03-01T00:00:01.000000Z",
+            evidence_ids=("evidence-1",),
+            provenance={"replica_id": "sender"},
+        ),
+    )
+    batch = (evidence, claim)
 
-    sender.commit_batch(_batch())
-    report = receiver.sync_from(sender, max_ops=2)
+    sender.commit_batch(batch)
+    report = receiver.sync_from(sender, max_ops=1)
 
-    assert report.transferred_op_ids == tuple(op.op_id for op in _batch())
+    assert report.transferred_op_ids == tuple(op.op_id for op in batch)
     assert "claim-1" in receiver.materialize().claims_by_id
