@@ -124,8 +124,8 @@ def main(
 
     print("Resolver:", resolver_name)
     print("Base conflicts:", len(base_state.conflicts))
-    print("Selected claims:")
-    for key, claim in projection.selected_claims.items():
+    print("Provisional resolver suggestions:")
+    for key, claim in projection.provisional_claims.items():
         print(key.to_dict(), "->", claim.value)
     print("Unresolved conflicts:", len(projection.unresolved_conflicts))
 

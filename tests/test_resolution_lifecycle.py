@@ -256,9 +256,7 @@ def test_lifecycle_tie_break_invalidation_and_history_survive_retraction() -> No
     ]
 
     current = materialize(OpLog([*claims, resolution, resolved, invalidated]))
-    retracted = materialize(
-        OpLog([*claims, resolution, invalidated, resolved, *retractions])
-    )
+    retracted = materialize(OpLog([*claims, resolution, invalidated, resolved, *retractions]))
 
     assert [
         event.event_id for event in current.lifecycle_history_by_conflict_ref[conflict_ref]
@@ -285,7 +283,10 @@ def test_llm_recommendation_is_not_persisted() -> None:
         resolver=LLMResolver(client=FakeClient()),
     )
 
-    assert projection.selected_claims[KEY].claim_id == "c2"
+    assert projection.selected_claims == {}
+    assert projection.provisional_claims[KEY].claim_id == "c2"
+    assert projection.selection_basis[KEY] == "provisional"
+    assert projection.unresolved_conflicts == state.conflicts
     assert state.resolutions_by_id == {}
     assert state.lifecycle_events_by_id == {}
     assert len(oplog) == 2

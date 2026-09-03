@@ -30,7 +30,7 @@ from .ops import (
     ResolutionAdded,
     SourceAdded,
 )
-from .resolver import HeuristicResolver, Resolver, ViewConstraints
+from .resolver import Resolver, ViewConstraints
 from .store import InMemoryStore, OpStore
 from .utils import content_addressed_op_id, digest_content, digest_json_value, new_uuid, utc_now_iso
 from .view import Projection
@@ -145,9 +145,7 @@ class Memory:
         )
         op = EvidenceAdded(
             op_id=op_id
-            or self._new_op_id(
-                "EvidenceAdded", timestamp, {"evidence": evidence.to_dict()}
-            ),
+            or self._new_op_id("EvidenceAdded", timestamp, {"evidence": evidence.to_dict()}),
             replica_id=self.replica_id,
             timestamp=timestamp,
             evidence=evidence,
@@ -305,9 +303,7 @@ class Memory:
         )
         op = ResolutionAdded(
             op_id=op_id
-            or self._new_op_id(
-                "ResolutionAdded", timestamp, {"resolution": resolution.to_dict()}
-            ),
+            or self._new_op_id("ResolutionAdded", timestamp, {"resolution": resolution.to_dict()}),
             replica_id=self.replica_id,
             timestamp=timestamp,
             resolution=resolution,
@@ -332,9 +328,7 @@ class Memory:
         )
         op = DecisionAdded(
             op_id=op_id
-            or self._new_op_id(
-                "DecisionAdded", timestamp, {"decision": decision.to_dict()}
-            ),
+            or self._new_op_id("DecisionAdded", timestamp, {"decision": decision.to_dict()}),
             replica_id=self.replica_id,
             timestamp=timestamp,
             decision=decision,
@@ -369,9 +363,7 @@ class Memory:
         )
         op = DerivationAdded(
             op_id=op_id
-            or self._new_op_id(
-                "DerivationAdded", timestamp, {"derivation": derivation.to_dict()}
-            ),
+            or self._new_op_id("DerivationAdded", timestamp, {"derivation": derivation.to_dict()}),
             replica_id=self.replica_id,
             timestamp=timestamp,
             derivation=derivation,
@@ -404,9 +396,9 @@ class Memory:
         applicability_context: dict[str, JSONValue] | None = None,
         **filters: Any,
     ) -> tuple[ConflictSet, ...]:
-        return self.materialize(
-            valid_at=valid_at, context=applicability_context
-        ).find_conflicts(**filters)
+        return self.materialize(valid_at=valid_at, context=applicability_context).find_conflicts(
+            **filters
+        )
 
     def merge_from(self, other_store_or_oplog: OpStore | OpLog) -> OpLog:
         if isinstance(other_store_or_oplog, OpLog):
@@ -434,7 +426,7 @@ class Memory:
         return build_projection(
             state=state,
             constraints=constraints,
-            resolver=resolver or HeuristicResolver(),
+            resolver=resolver,
         )
 
     def claim_ref_for(
