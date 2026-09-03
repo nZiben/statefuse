@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from .conflict import DIRECT_CONFLICT_TYPE, ConflictSet
 from .materialize import MemoryState
 from .model import Claim, ClaimKey
-from .resolver import Resolver, ViewConstraints
+from .resolver import HeuristicResolver, Resolver, ViewConstraints
 from .utils import parse_utc_iso
 
 
@@ -14,16 +13,12 @@ from .utils import parse_utc_iso
 class Projection:
     selected_claims: dict[ClaimKey, Claim] = field(default_factory=dict)
     unresolved_conflicts: list[ConflictSet] = field(default_factory=list)
-    # Public contract: surfaced conflicts remain visible even when a resolver suggests a
+    # Public contract: surfaced conflicts remain visible even when a resolver picks a
     # projection-time winner.
     surfaced_conflicts: dict[ClaimKey, ConflictSet] = field(default_factory=dict)
     explanations: dict[str, str] = field(default_factory=dict)
     surfaced_findings: dict[str, ConflictSet] = field(default_factory=dict)
     compatible_claims: dict[ClaimKey, tuple[Claim, ...]] = field(default_factory=dict)
-    provisional_claims: dict[ClaimKey, Claim] = field(default_factory=dict)
-    selection_basis: dict[
-        ClaimKey, Literal["deterministic", "committed", "provisional", "abstained"]
-    ] = field(default_factory=dict)
 
 
 def _key_label(key: ClaimKey) -> str:
@@ -127,16 +122,13 @@ def build_view(
     constraints: ViewConstraints,
     resolver: Resolver | None = None,
 ) -> Projection:
+    active_resolver = resolver or HeuristicResolver()
     conflicts_by_key = {
         key: tuple(conflict for conflict in conflicts if _is_selectable_conflict(conflict))
         for key, conflicts in state.conflicts_by_key.items()
     }
 
     selected_claims: dict[ClaimKey, Claim] = {}
-    provisional_claims: dict[ClaimKey, Claim] = {}
-    selection_basis: dict[
-        ClaimKey, Literal["deterministic", "committed", "provisional", "abstained"]
-    ] = {}
     unresolved_conflicts: list[ConflictSet] = []
     surfaced_conflicts: dict[ClaimKey, ConflictSet] = {}
     surfaced_findings = {conflict.conflict_id: conflict for conflict in state.conflicts}
@@ -156,7 +148,6 @@ def build_view(
                 for claim in claims[1:]
             ):
                 compatible_claims[key] = tuple(claims)
-                selection_basis[key] = "abstained"
                 explanations[label] = (
                     "Compatible context, time, or multi-valued alternatives; "
                     "no single claim selected."
@@ -164,7 +155,6 @@ def build_view(
                 continue
             chosen = _deterministic_claim_choice(claims)
             selected_claims[key] = chosen
-            selection_basis[key] = "deterministic"
             explanations[label] = f"No conflict. Selected {chosen.claim_id} deterministically."
             continue
 
@@ -183,27 +173,19 @@ def build_view(
         if committed_applied:
             if committed is not None:
                 selected_claims[key] = committed
-                selection_basis[key] = "committed"
                 explanations[label] = (
-                    f"Resolved {conflict.conflict_id} -> {committed.claim_id}: {committed_detail}."
+                    f"Resolved {conflict.conflict_id} -> {committed.claim_id}: "
+                    f"{committed_detail}."
                 )
             else:
-                selection_basis[key] = "committed"
                 explanations[label] = f"Resolved {conflict.conflict_id}: {committed_detail}."
             continue
         if committed_detail is not None:
             unresolved_conflicts.append(conflict)
-            selection_basis[key] = "abstained"
             explanations[label] = f"Unresolved {conflict.conflict_id}: {committed_detail}."
             continue
 
-        if resolver is None:
-            unresolved_conflicts.append(conflict)
-            selection_basis[key] = "abstained"
-            explanations[label] = f"Unresolved {conflict.conflict_id}: no committed resolution."
-            continue
-
-        resolution = resolver.resolve(conflict, constraints, state)
+        resolution = active_resolver.resolve(conflict, constraints, state)
         chosen: Claim | None = None
         if resolution.chosen_claim_id:
             for candidate in conflict.candidates:
@@ -214,17 +196,14 @@ def build_view(
         raw_response = resolution.metadata.get("raw_response")
         if chosen is None:
             unresolved_conflicts.append(conflict)
-            selection_basis[key] = "abstained"
             detail = f"Unresolved {conflict.conflict_id}: {resolution.reason}"
             if raw_response is not None:
                 detail += f" | raw_response={raw_response}"
             explanations[label] = detail
             continue
 
-        provisional_claims[key] = chosen
-        selection_basis[key] = "provisional"
-        unresolved_conflicts.append(conflict)
-        detail = f"Suggested {conflict.conflict_id} -> {chosen.claim_id}: {resolution.reason}"
+        selected_claims[key] = chosen
+        detail = f"Resolved {conflict.conflict_id} -> {chosen.claim_id}: {resolution.reason}"
         if raw_response is not None:
             detail += f" | raw_response={raw_response}"
         explanations[label] = detail
@@ -245,16 +224,8 @@ def build_view(
                         continue
                     if selected_claims.get(claim.key) == claim:
                         selected_claims.pop(claim.key)
-                        selection_basis[claim.key] = "committed"
                         explanations[_key_label(claim.key)] = (
                             f"Excluded {claim.claim_id} by committed "
-                            f"{resolution.outcome} resolution {resolution.resolution_id}."
-                        )
-                    if provisional_claims.get(claim.key) == claim:
-                        provisional_claims.pop(claim.key)
-                        selection_basis[claim.key] = "committed"
-                        explanations[_key_label(claim.key)] = (
-                            f"Excluded provisional {claim.claim_id} by committed "
                             f"{resolution.outcome} resolution {resolution.resolution_id}."
                         )
                     alternatives = compatible_claims.get(claim.key)
@@ -263,7 +234,6 @@ def build_view(
                         if len(remaining) == 1:
                             compatible_claims.pop(claim.key)
                             selected_claims[claim.key] = remaining[0]
-                            selection_basis[claim.key] = "committed"
                         elif remaining:
                             compatible_claims[claim.key] = remaining
                         else:
@@ -282,8 +252,6 @@ def build_view(
     )
     return Projection(
         selected_claims=selected_claims,
-        provisional_claims=provisional_claims,
-        selection_basis=selection_basis,
         unresolved_conflicts=unresolved_conflicts,
         surfaced_conflicts=surfaced_conflicts,
         surfaced_findings=surfaced_findings,

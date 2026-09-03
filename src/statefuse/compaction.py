@@ -7,7 +7,7 @@ from .conflict import ConflictDetector, PredicateRegistry
 from .materialize import materialize
 from .oplog import OpLog
 from .ops import ClaimAdded, ClaimRetracted, DecisionAdded, EvidenceAdded
-from .resolver import Resolver, ViewConstraints
+from .resolver import HeuristicResolver, Resolver, ViewConstraints
 from .view import build_view
 
 
@@ -56,10 +56,9 @@ def _projection_signature(
     *,
     predicate_registry: PredicateRegistry,
     constraints: ViewConstraints,
-    resolver: Resolver | None,
+    resolver: Resolver,
     conflict_detectors: Sequence[ConflictDetector],
 ) -> tuple[
-    tuple[tuple[str, str], ...],
     tuple[tuple[str, str], ...],
     tuple[tuple[str, tuple[str, ...]], ...],
     tuple[str, ...],
@@ -82,10 +81,6 @@ def _projection_signature(
         (f"{key.namespace}:{key.subject}:{key.predicate}", claim.claim_id)
         for key, claim in sorted(projection.selected_claims.items())
     )
-    provisional = tuple(
-        (f"{key.namespace}:{key.subject}:{key.predicate}", claim.claim_id)
-        for key, claim in sorted(projection.provisional_claims.items())
-    )
     compatible = tuple(
         (
             f"{key.namespace}:{key.subject}:{key.predicate}",
@@ -94,9 +89,11 @@ def _projection_signature(
         for key, claims in sorted(projection.compatible_claims.items())
     )
     unresolved = tuple(conflict.conflict_id for conflict in projection.unresolved_conflicts)
-    surfaced = tuple(conflict_id for conflict_id in sorted(projection.surfaced_findings))
+    surfaced = tuple(
+        conflict_id for conflict_id in sorted(projection.surfaced_findings)
+    )
     explanations = tuple(sorted(projection.explanations.items()))
-    return selected, provisional, compatible, unresolved, surfaced, explanations
+    return selected, compatible, unresolved, surfaced, explanations
 
 
 def compact_projection_equivalent(
@@ -121,7 +118,7 @@ def compact_projection_equivalent_with_report(
     conflict_detectors: Sequence[ConflictDetector] = (),
 ) -> CompactionReport:
     registry = predicate_registry or PredicateRegistry()
-    active_resolver = resolver
+    active_resolver = resolver or HeuristicResolver()
     active_constraints = constraints or ViewConstraints(scope="projection-equivalent-compaction")
 
     state = materialize(
