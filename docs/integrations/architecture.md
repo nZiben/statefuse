@@ -46,9 +46,10 @@ external write succeeds.
 
 Search produces normalized `SearchHit` values, not authoritative claims. `hydrate_search_hits()`
 loads current StateFuse state and expands each seed claim to its current conflicts, competing
-claims, and effective or stale resolution. It reports current statuses and explicit truncation
-when caller-supplied bounds are reached. A hit for a retracted claim is marked inactive; stale
-external text cannot reactivate it.
+claims, evidence, sources, derivations, and effective or stale resolution. Expansion is
+deterministic and limited by `max_depth` plus per-resource bounds. Missing, inactive,
+inapplicable, stale, and omitted records are reported explicitly. A hit for a retracted claim is
+marked inactive; stale external text cannot reactivate it.
 
 ## Included connectors
 

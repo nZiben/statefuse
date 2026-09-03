@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..conflict import ConflictSet
-from ..model import Claim, JSONValue, ResolutionRecord
+from ..model import Claim, Derivation, Evidence, JSONValue, ResolutionRecord, Source
 
 
 @dataclass(frozen=True)
@@ -121,20 +121,53 @@ class HydratedContext:
     claim_statuses: dict[str, str] = field(default_factory=dict)
     conflict_statuses: dict[str, str] = field(default_factory=dict)
     resolutions: tuple[ResolutionRecord, ...] = ()
+    resolution_history: tuple[ResolutionRecord, ...] = ()
+    stale_resolutions: tuple[ResolutionRecord, ...] = ()
     resolution_statuses: dict[str, str] = field(default_factory=dict)
+    evidence: tuple[Evidence, ...] = ()
+    sources: tuple[Source, ...] = ()
+    derivations: tuple[Derivation, ...] = ()
+    missing_evidence_ids: tuple[str, ...] = ()
+    missing_source_ids: tuple[str, ...] = ()
+    missing_derivation_ids: tuple[str, ...] = ()
     omitted_claim_ids: tuple[str, ...] = ()
     omitted_conflict_ids: tuple[str, ...] = ()
+    omitted_evidence_ids: tuple[str, ...] = ()
+    omitted_source_ids: tuple[str, ...] = ()
+    omitted_derivation_ids: tuple[str, ...] = ()
+    omitted_resolution_ids: tuple[str, ...] = ()
     search_failures: tuple[SyncFailure, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "claim_statuses", dict(self.claim_statuses))
         object.__setattr__(self, "conflict_statuses", dict(self.conflict_statuses))
         object.__setattr__(self, "resolutions", tuple(self.resolutions))
+        object.__setattr__(self, "resolution_history", tuple(self.resolution_history))
+        object.__setattr__(self, "stale_resolutions", tuple(self.stale_resolutions))
         object.__setattr__(self, "resolution_statuses", dict(self.resolution_statuses))
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+        object.__setattr__(self, "sources", tuple(self.sources))
+        object.__setattr__(self, "derivations", tuple(self.derivations))
+        object.__setattr__(self, "missing_evidence_ids", tuple(self.missing_evidence_ids))
+        object.__setattr__(self, "missing_source_ids", tuple(self.missing_source_ids))
+        object.__setattr__(self, "missing_derivation_ids", tuple(self.missing_derivation_ids))
         object.__setattr__(self, "omitted_claim_ids", tuple(self.omitted_claim_ids))
         object.__setattr__(self, "omitted_conflict_ids", tuple(self.omitted_conflict_ids))
+        object.__setattr__(self, "omitted_evidence_ids", tuple(self.omitted_evidence_ids))
+        object.__setattr__(self, "omitted_source_ids", tuple(self.omitted_source_ids))
+        object.__setattr__(self, "omitted_derivation_ids", tuple(self.omitted_derivation_ids))
+        object.__setattr__(self, "omitted_resolution_ids", tuple(self.omitted_resolution_ids))
         object.__setattr__(self, "search_failures", tuple(self.search_failures))
 
     @property
     def truncated(self) -> bool:
-        return bool(self.omitted_claim_ids or self.omitted_conflict_ids)
+        return any(
+            (
+                self.omitted_claim_ids,
+                self.omitted_conflict_ids,
+                self.omitted_evidence_ids,
+                self.omitted_source_ids,
+                self.omitted_derivation_ids,
+                self.omitted_resolution_ids,
+            )
+        )
