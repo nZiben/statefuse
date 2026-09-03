@@ -40,12 +40,22 @@ from .ops import (
     ResolutionAdded,
     SourceAdded,
 )
+from .replica import (
+    ReplicaDelta,
+    ReplicaManifest,
+    ReplicaProgress,
+    ReplicaSyncReport,
+    advance_replica_progress,
+)
 from .resolver import Resolver, ViewConstraints
 from .store import (
+    BatchOpStore,
     IncrementalOpStore,
     InMemoryStore,
     MaterializationCheckpoint,
     OpStore,
+    ReplicaProgressStore,
+    StoreDelta,
 )
 from .utils import content_addressed_op_id, digest_content, digest_json_value, new_uuid, utc_now_iso
 from .view import Projection
@@ -96,6 +106,13 @@ class Memory:
 
     def append_op(self, op: AnyOp) -> bool:
         return self.store.append(op)
+
+    def commit_batch(self, ops: Sequence[AnyOp]) -> tuple[bool, ...]:
+        """Commit one already-extracted logical event as a store batch."""
+
+        if not isinstance(self.store, BatchOpStore):
+            raise TypeError("The configured operation store does not support batch commits.")
+        return self.store.append_many(*tuple(ops))
 
     def load_oplog(self) -> OpLog:
         return self.store.load_oplog()
@@ -498,9 +515,179 @@ class Memory:
         else:
             raise TypeError("Expected OpLog or OpStore-compatible object.")
         merged = merge(self.load_oplog(), other_oplog)
-        for op in merged.iter_ops():
-            self.store.append(op)
+        if isinstance(self.store, BatchOpStore):
+            self.store.append_many(*merged.iter_ops())
+        else:
+            for op in merged.iter_ops():
+                self.store.append(op)
         return merged
+
+    def export_replica_manifest(
+        self,
+        after_cursor: int,
+        *,
+        max_ops: int | None = None,
+    ) -> ReplicaManifest:
+        """Describe a stream suffix without transferring operation payloads."""
+        store_delta = self._read_replica_store_delta(after_cursor, max_ops=max_ops)
+        return ReplicaManifest(
+            sender_replica_id=self.replica_id,
+            cursor_before=after_cursor,
+            cursor_after=store_delta.cursor,
+            entries=tuple(
+                (op.op_id, digest_content(op.to_json())) for op in store_delta.ops
+            ),
+            batch_sizes=store_delta.batch_sizes,
+        )
+
+    def export_replica_delta(
+        self,
+        after_cursor: int,
+        *,
+        max_ops: int | None = None,
+    ) -> ReplicaDelta:
+        """Return the append-only portion of this replica stream after a cursor."""
+        store_delta = self._read_replica_store_delta(after_cursor, max_ops=max_ops)
+        return ReplicaDelta(
+            sender_replica_id=self.replica_id,
+            cursor_before=after_cursor,
+            cursor_after=store_delta.cursor,
+            ops=store_delta.ops,
+            batch_sizes=store_delta.batch_sizes,
+        )
+
+    def _export_manifest_delta(
+        self, manifest: ReplicaManifest, op_ids: tuple[str, ...]
+    ) -> ReplicaDelta:
+        if manifest.sender_replica_id != self.replica_id:
+            raise ValueError("Replica manifest sender does not match this replica.")
+        if not manifest.entries:
+            return ReplicaDelta(
+                self.replica_id, manifest.cursor_before, manifest.cursor_after
+            )
+        store_delta = self._read_replica_store_delta(
+            manifest.cursor_before, max_ops=len(manifest.entries)
+        )
+        current_entries = tuple(
+            (op.op_id, digest_content(op.to_json())) for op in store_delta.ops
+        )
+        if store_delta.cursor != manifest.cursor_after or current_entries != manifest.entries:
+            raise ValueError("Replica stream changed while exporting a manifest payload.")
+        wanted = set(op_ids)
+        ops: list[AnyOp] = []
+        batch_sizes: list[int] = []
+        for batch in store_delta.batches:
+            selected = tuple(op for op in batch if op.op_id in wanted)
+            if selected:
+                ops.extend(selected)
+                batch_sizes.append(len(selected))
+        return ReplicaDelta(
+            sender_replica_id=self.replica_id,
+            cursor_before=manifest.cursor_before,
+            cursor_after=manifest.cursor_after,
+            ops=tuple(ops),
+            batch_sizes=tuple(batch_sizes),
+        )
+
+    def replica_progress(self, peer_replica_id: str) -> ReplicaProgress:
+        """Load durable receive progress for one peer's append-only stream."""
+        store = self._replica_progress_store()
+        return store.load_replica_progress(peer_replica_id)
+
+    def apply_replica_delta(self, delta: ReplicaDelta) -> ReplicaSyncReport:
+        """Apply a peer delta idempotently and advance progress after durable writes."""
+        if delta.sender_replica_id == self.replica_id:
+            raise ValueError("Cannot apply a replica delta from the local replica_id.")
+        progress_store = self._replica_progress_store()
+        progress = progress_store.load_replica_progress(delta.sender_replica_id)
+
+        added_items: list[bool] = []
+        for batch in delta.batches:
+            append_many = getattr(self.store, "append_many", None)
+            if callable(append_many):
+                added_items.extend(append_many(*batch))
+            else:
+                added_items.extend(self.store.append(op) for op in batch)
+        added = tuple(added_items)
+
+        applied_op_ids = tuple(
+            op.op_id for op, was_added in zip(delta.ops, added, strict=True) if was_added
+        )
+        duplicate_op_ids = tuple(
+            op.op_id for op, was_added in zip(delta.ops, added, strict=True) if not was_added
+        )
+
+        # Update an existing in-process materialization before recording receipt.
+        # If this fails, progress stays behind and a retry safely deduplicates writes.
+        if delta.ops:
+            self.materialize()
+
+        updated = advance_replica_progress(
+            progress,
+            cursor_before=delta.cursor_before,
+            cursor_after=delta.cursor_after,
+        )
+        progress_store.save_replica_progress(updated)
+        return ReplicaSyncReport(
+            peer_replica_id=delta.sender_replica_id,
+            cursor_before=progress.cursor,
+            cursor_after=updated.cursor,
+            transferred_op_ids=tuple(op.op_id for op in delta.ops),
+            applied_op_ids=applied_op_ids,
+            duplicate_op_ids=duplicate_op_ids,
+            pending_ranges=updated.pending_ranges,
+        )
+
+    def sync_from(self, peer: Memory, *, max_ops: int | None = None) -> ReplicaSyncReport:
+        """Pull only locally unknown operations from a peer's durable cursor."""
+        if peer.replica_id == self.replica_id:
+            raise ValueError("Replica sync requires distinct replica_id values.")
+        progress = self.replica_progress(peer.replica_id)
+        manifest = peer.export_replica_manifest(progress.cursor, max_ops=max_ops)
+        if manifest.sender_replica_id != peer.replica_id:
+            raise ValueError("Replica manifest sender does not match the requested peer.")
+
+        op_ids = tuple(op_id for op_id, _digest in manifest.entries)
+        find_existing = getattr(self.store, "find_ops", None)
+        if callable(find_existing):
+            existing = find_existing(op_ids)
+        else:
+            local_oplog = self.store.load_oplog()
+            existing = {op_id: op for op_id in op_ids if (op := local_oplog.get(op_id)) is not None}
+        unknown_op_ids: list[str] = []
+        for op_id, expected_digest in manifest.entries:
+            known_op = existing.get(op_id)
+            if known_op is None:
+                unknown_op_ids.append(op_id)
+            elif digest_content(known_op.to_json()) != expected_digest:
+                raise ValueError(f"op_id collision with different payload: {op_id}")
+        return self.apply_replica_delta(
+            peer._export_manifest_delta(manifest, tuple(unknown_op_ids))
+        )
+
+    def reset_replica_progress(self, peer_replica_id: str) -> None:
+        """Forget one stream cursor after its peer log is compacted or replaced."""
+        self._replica_progress_store().reset_replica_progress(peer_replica_id)
+
+    def _read_replica_store_delta(
+        self, after_cursor: int, *, max_ops: int | None
+    ) -> StoreDelta:
+        if not isinstance(after_cursor, int) or isinstance(after_cursor, bool) or after_cursor < 0:
+            raise ValueError("Replica delta cursor must be a non-negative integer.")
+        if max_ops is not None and (
+            not isinstance(max_ops, int) or isinstance(max_ops, bool) or max_ops < 1
+        ):
+            raise ValueError("Replica delta max_ops must be a positive integer.")
+        if not isinstance(self.store, IncrementalOpStore):
+            raise TypeError("Replica delta export requires an IncrementalOpStore.")
+        if max_ops is None:
+            return self.store.read_after(after_cursor)
+        try:
+            return self.store.read_after(after_cursor, limit=max_ops)  # type: ignore[call-arg]
+        except TypeError as error:
+            raise TypeError(
+                "Bounded replica delta export requires a store with limited reads."
+            ) from error
 
     def build_view(
         self,
@@ -556,6 +743,11 @@ class Memory:
             timestamp=timestamp,
             payload=payload,
         )
+
+    def _replica_progress_store(self) -> ReplicaProgressStore:
+        if not isinstance(self.store, ReplicaProgressStore):
+            raise TypeError("Replica delta sync requires a ReplicaProgressStore.")
+        return self.store
 
     def _materialize_canonical_incrementally(self) -> MemoryState:
         assert isinstance(self.store, IncrementalOpStore)

@@ -53,6 +53,7 @@ from .ops import (
     ResolutionAdded,
     SourceAdded,
 )
+from .replica import ReplicaDelta, ReplicaManifest, ReplicaProgress, ReplicaSyncReport
 from .resolution_policy import (
     Abstention,
     CausalResolver,
@@ -74,11 +75,13 @@ from .resolver import (
     ViewConstraints,
 )
 from .store import (
+    BatchOpStore,
     IncrementalOpStore,
     InMemoryStore,
     JsonlStore,
     MaterializationCheckpoint,
     OpStore,
+    ReplicaProgressStore,
     SQLiteStore,
     StoreDelta,
 )
@@ -87,6 +90,7 @@ from .view import Projection, build_view
 __all__ = [
     "Abstention",
     "AnyOp",
+    "BatchOpStore",
     "CausalResolver",
     "CompactionReport",
     "Claim",
@@ -142,6 +146,11 @@ __all__ = [
     "ResolutionContext",
     "ResolutionRecord",
     "ResolutionResult",
+    "ReplicaDelta",
+    "ReplicaManifest",
+    "ReplicaProgress",
+    "ReplicaProgressStore",
+    "ReplicaSyncReport",
     "Resolver",
     "ResolverRegistry",
     "retraction_signature_status",
