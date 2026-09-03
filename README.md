@@ -100,6 +100,16 @@ Synchronize only after the StateFuse operation commits. Adapter failures are ret
 - [Build a custom adapter](docs/integrations/custom-adapter.md)
 - [Test an adapter](docs/integrations/testing.md)
 
+## Incremental materialization
+
+Built-in stores expose cursors so repeated `Memory.materialize()` calls process only newly
+appended operations. JSONL and SQLite stores also save versioned checkpoints every 100 applied
+operations; incompatible checkpoint versions fall back to a full rebuild.
+
+Custom conflict detectors always use full materialization. A custom `PredicateRegistry` is only
+checkpointed when `materialization_config_token` is supplied; change that token whenever predicate
+semantics change. Runtime registry changes invalidate the in-memory cache automatically.
+
 ## Development
 
 ```bash

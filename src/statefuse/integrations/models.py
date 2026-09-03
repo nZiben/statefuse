@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from ..conflict import ConflictSet
-from ..model import Claim, JSONValue
+from ..model import Claim, JSONValue, ResolutionRecord
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,22 @@ class SyncReport:
 
 
 @dataclass(frozen=True)
+class PendingProjectionDelta:
+    repository: str
+    namespace: str
+    projection_id: str
+    operation: Literal["upsert", "delete"]
+    cursor: int
+    record: RetrievalRecord | None = None
+
+    def __post_init__(self) -> None:
+        if self.operation == "upsert" and self.record is None:
+            raise ValueError("A pending upsert requires a retrieval record.")
+        if self.operation == "delete" and self.record is not None:
+            raise ValueError("A pending delete cannot contain a retrieval record.")
+
+
+@dataclass(frozen=True)
 class HydratedContext:
     claims: tuple[Claim, ...]
     conflicts: tuple[ConflictSet, ...]
@@ -103,7 +120,21 @@ class HydratedContext:
     search_hits: tuple[SearchHit, ...]
     claim_statuses: dict[str, str] = field(default_factory=dict)
     conflict_statuses: dict[str, str] = field(default_factory=dict)
+    resolutions: tuple[ResolutionRecord, ...] = ()
+    resolution_statuses: dict[str, str] = field(default_factory=dict)
+    omitted_claim_ids: tuple[str, ...] = ()
+    omitted_conflict_ids: tuple[str, ...] = ()
+    search_failures: tuple[SyncFailure, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "claim_statuses", dict(self.claim_statuses))
         object.__setattr__(self, "conflict_statuses", dict(self.conflict_statuses))
+        object.__setattr__(self, "resolutions", tuple(self.resolutions))
+        object.__setattr__(self, "resolution_statuses", dict(self.resolution_statuses))
+        object.__setattr__(self, "omitted_claim_ids", tuple(self.omitted_claim_ids))
+        object.__setattr__(self, "omitted_conflict_ids", tuple(self.omitted_conflict_ids))
+        object.__setattr__(self, "search_failures", tuple(self.search_failures))
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.omitted_claim_ids or self.omitted_conflict_ids)
