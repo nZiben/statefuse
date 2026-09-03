@@ -5,6 +5,7 @@ from typing import Protocol
 from .models import (
     ExternalReference,
     ExternalWriteResult,
+    PendingProjectionDelta,
     RetrievalRecord,
     SearchHit,
     SearchRequest,
@@ -61,4 +62,15 @@ class ExternalReferenceStore(Protocol):
         ...
 
     def list(self, repository: str, namespace: str) -> tuple[ExternalReference, ...]:
+        ...
+
+
+class LocalProjectionDeltaStore(Protocol):
+    def upsert(self, delta: PendingProjectionDelta) -> None:
+        ...
+
+    def delete(self, repository: str, namespace: str, projection_id: str) -> bool:
+        ...
+
+    def list(self, repository: str, namespace: str) -> tuple[PendingProjectionDelta, ...]:
         ...

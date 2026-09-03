@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
+from dataclasses import fields, replace
 from typing import Any, Literal
 
 from .auth import sign_claim
 from .conflict import ConflictDetector, ConflictSet, PredicateRegistry
-from .materialize import MemoryState, materialize
+from .materialize import (
+    MATERIALIZATION_CHECKPOINT_VERSION,
+    MaterializationDelta,
+    MemoryState,
+    apply_operations_incrementally,
+    materialize,
+    memory_state_from_checkpoint,
+    memory_state_to_checkpoint,
+)
 from .merge import merge
 from .model import (
     Claim,
@@ -31,12 +41,18 @@ from .ops import (
     SourceAdded,
 )
 from .resolver import Resolver, ViewConstraints
-from .store import InMemoryStore, OpStore
+from .store import (
+    IncrementalOpStore,
+    InMemoryStore,
+    MaterializationCheckpoint,
+    OpStore,
+)
 from .utils import content_addressed_op_id, digest_content, digest_json_value, new_uuid, utc_now_iso
 from .view import Projection
 from .view import build_view as build_projection
 
 OpIdMode = Literal["uuid4", "content-addressed"]
+_CHECKPOINT_INTERVAL_OPS = 100
 
 
 class Memory:
@@ -50,14 +66,33 @@ class Memory:
         op_id_mode: OpIdMode = "uuid4",
         predicate_registry: PredicateRegistry | None = None,
         conflict_detectors: Sequence[ConflictDetector] = (),
+        materialization_config_token: str | None = None,
     ) -> None:
-        self.store = store or InMemoryStore()
+        self.store = store if store is not None else InMemoryStore()
         self.replica_id = replica_id
         if op_id_mode not in {"uuid4", "content-addressed"}:
             raise ValueError("op_id_mode must be 'uuid4' or 'content-addressed'.")
         self.op_id_mode = op_id_mode
-        self.predicate_registry = predicate_registry or PredicateRegistry()
+        self.predicate_registry = (
+            predicate_registry if predicate_registry is not None else PredicateRegistry()
+        )
         self.conflict_detectors = tuple(conflict_detectors)
+        self._automatic_materialization_config = (
+            materialization_config_token is None
+            and predicate_registry is None
+            and not conflict_detectors
+        )
+        self._materialization_config_token = (
+            materialization_config_token
+            if materialization_config_token is not None
+            else "default" if self._automatic_materialization_config else None
+        )
+        self._materialized_state: MemoryState | None = None
+        self._materialized_registry: PredicateRegistry | None = None
+        self._materialized_registry_revision = -1
+        self._materialization_cursor = 0
+        self._materialization_history: deque[MaterializationDelta] = deque(maxlen=1024)
+        self._ops_since_checkpoint = 0
 
     def append_op(self, op: AnyOp) -> bool:
         return self.store.append(op)
@@ -379,15 +414,70 @@ class Memory:
         valid_at: str | None = None,
         context: dict[str, JSONValue] | None = None,
     ) -> MemoryState:
+        registry = predicate_registry or self.predicate_registry
+        detectors = self.conflict_detectors if conflict_detectors is None else conflict_detectors
+        if (
+            predicate_registry is None
+            and not detectors
+            and valid_at is None
+            and context is None
+            and isinstance(self.store, IncrementalOpStore)
+        ):
+            return _snapshot_state(self._materialize_canonical_incrementally())
         return materialize(
             self.load_oplog(),
-            predicate_registry=predicate_registry or self.predicate_registry,
-            conflict_detectors=(
-                self.conflict_detectors if conflict_detectors is None else conflict_detectors
-            ),
+            predicate_registry=registry,
+            conflict_detectors=detectors,
             valid_at=valid_at,
             context=context,
         )
+
+    def materialize_with_delta(
+        self,
+        since_cursor: int | None,
+    ) -> tuple[MemoryState, MaterializationDelta]:
+        if self.conflict_detectors or not isinstance(self.store, IncrementalOpStore):
+            state = self.materialize()
+            return state, MaterializationDelta(full_rebuild=True)
+        state = _snapshot_state(self._materialize_canonical_incrementally())
+        current = self._materialization_cursor
+        if since_cursor is None:
+            return state, MaterializationDelta(
+                cursor_after=current,
+                full_rebuild=True,
+            )
+        if since_cursor == current:
+            return state, MaterializationDelta(
+                cursor_before=current,
+                cursor_after=current,
+            )
+        deltas: list[MaterializationDelta] = []
+        expected = since_cursor
+        for delta in self._materialization_history:
+            if delta.cursor_after <= since_cursor:
+                continue
+            if delta.cursor_before != expected:
+                return state, MaterializationDelta(
+                    cursor_before=since_cursor,
+                    cursor_after=current,
+                    full_rebuild=True,
+                )
+            deltas.append(delta)
+            expected = delta.cursor_after
+        if not deltas or expected != current:
+            return state, MaterializationDelta(
+                cursor_before=since_cursor,
+                cursor_after=current,
+                full_rebuild=True,
+            )
+        return state, self._combine_materialization_deltas(deltas)
+
+    @property
+    def materialization_cursor(self) -> int | None:
+        if not isinstance(self.store, IncrementalOpStore) or self.conflict_detectors:
+            return None
+        self._materialize_canonical_incrementally()
+        return self._materialization_cursor
 
     def find_conflicts(
         self,
@@ -466,3 +556,171 @@ class Memory:
             timestamp=timestamp,
             payload=payload,
         )
+
+    def _materialize_canonical_incrementally(self) -> MemoryState:
+        assert isinstance(self.store, IncrementalOpStore)
+        if self._automatic_materialization_config and (
+            self.predicate_registry.revision != 0
+            or (
+                self._materialized_registry is not None
+                and self.predicate_registry is not self._materialized_registry
+            )
+        ):
+            self._materialization_config_token = None
+        if self._materialized_state is not None and (
+            self._materialized_registry is not self.predicate_registry
+            or self._materialized_registry_revision != self.predicate_registry.revision
+        ):
+            self._rebuild_materialized_state()
+        if self._materialized_state is None:
+            self._restore_or_build_materialized_state()
+        assert self._materialized_state is not None
+        try:
+            store_delta = self.store.read_after(self._materialization_cursor)
+        except ValueError:
+            self._rebuild_materialized_state()
+            return self._materialized_state
+        if not store_delta.ops:
+            return self._materialized_state
+        state, delta = apply_operations_incrementally(
+            self._materialized_state,
+            store_delta.ops,
+        )
+        delta = replace(
+            delta,
+            cursor_before=self._materialization_cursor,
+            cursor_after=store_delta.cursor,
+        )
+        self._materialized_state = state
+        self._remember_materialization_registry()
+        self._materialization_cursor = store_delta.cursor
+        self._materialization_history.append(delta)
+        self._ops_since_checkpoint += len(store_delta.ops)
+        if self._ops_since_checkpoint >= _CHECKPOINT_INTERVAL_OPS:
+            self._save_materialization_checkpoint()
+        return state
+
+    def _restore_or_build_materialized_state(self) -> None:
+        assert isinstance(self.store, IncrementalOpStore)
+        checkpoint = self.store.load_materialization_checkpoint()
+        if (
+            checkpoint is not None
+            and self._materialization_config_token is not None
+            and checkpoint.version == MATERIALIZATION_CHECKPOINT_VERSION
+            and checkpoint.config_token == self._materialization_config_token
+        ):
+            try:
+                state = memory_state_from_checkpoint(
+                    checkpoint.payload,
+                    predicate_registry=self.predicate_registry,
+                )
+                store_delta = self.store.read_after(checkpoint.cursor)
+                if store_delta.ops:
+                    state, delta = apply_operations_incrementally(state, store_delta.ops)
+                    self._materialization_history.append(
+                        replace(
+                            delta,
+                            cursor_before=checkpoint.cursor,
+                            cursor_after=store_delta.cursor,
+                        )
+                    )
+                self._materialized_state = state
+                self._remember_materialization_registry()
+                self._materialization_cursor = store_delta.cursor
+                self._ops_since_checkpoint = len(store_delta.ops)
+                return
+            except (KeyError, TypeError, ValueError):
+                pass
+        self._rebuild_materialized_state()
+
+    def _rebuild_materialized_state(self) -> None:
+        assert isinstance(self.store, IncrementalOpStore)
+        store_delta = self.store.read_after(0)
+        self._materialized_state = materialize(
+            self.load_oplog(),
+            predicate_registry=self.predicate_registry,
+        )
+        self._materialization_cursor = store_delta.cursor
+        self._remember_materialization_registry()
+        self._materialization_history.clear()
+        self._save_materialization_checkpoint()
+
+    def _save_materialization_checkpoint(self) -> None:
+        if self._materialization_config_token is None or self._materialized_state is None:
+            return
+        assert isinstance(self.store, IncrementalOpStore)
+        self.store.save_materialization_checkpoint(
+            MaterializationCheckpoint(
+                version=MATERIALIZATION_CHECKPOINT_VERSION,
+                config_token=self._materialization_config_token,
+                cursor=self._materialization_cursor,
+                payload=memory_state_to_checkpoint(self._materialized_state),
+            )
+        )
+        self._ops_since_checkpoint = 0
+
+    def _remember_materialization_registry(self) -> None:
+        self._materialized_registry = self.predicate_registry
+        self._materialized_registry_revision = self.predicate_registry.revision
+
+    @staticmethod
+    def _combine_materialization_deltas(
+        deltas: Sequence[MaterializationDelta],
+    ) -> MaterializationDelta:
+        return MaterializationDelta(
+            processed_op_ids=tuple(op_id for delta in deltas for op_id in delta.processed_op_ids),
+            affected_keys=tuple(sorted({key for delta in deltas for key in delta.affected_keys})),
+            affected_namespaces=tuple(
+                sorted({namespace for delta in deltas for namespace in delta.affected_namespaces})
+            ),
+            affected_claim_ids=tuple(
+                sorted({claim_id for delta in deltas for claim_id in delta.affected_claim_ids})
+            ),
+            previous_conflict_ids=tuple(
+                sorted(
+                    {conflict_id for delta in deltas for conflict_id in delta.previous_conflict_ids}
+                )
+            ),
+            current_conflict_ids=tuple(
+                sorted(
+                    {conflict_id for delta in deltas for conflict_id in delta.current_conflict_ids}
+                )
+            ),
+            affected_conflict_refs=tuple(
+                sorted(
+                    {
+                        conflict_ref
+                        for delta in deltas
+                        for conflict_ref in delta.affected_conflict_refs
+                    }
+                )
+            ),
+            affected_resolution_ids=tuple(
+                sorted(
+                    {
+                        resolution_id
+                        for delta in deltas
+                        for resolution_id in delta.affected_resolution_ids
+                    }
+                )
+            ),
+            cursor_before=deltas[0].cursor_before,
+            cursor_after=deltas[-1].cursor_after,
+            conflict_comparisons=sum(delta.conflict_comparisons for delta in deltas),
+        )
+
+
+def _snapshot_state(state: MemoryState) -> MemoryState:
+    updates: dict[str, Any] = {}
+    for item in fields(state):
+        value = getattr(state, item.name)
+        if isinstance(value, dict):
+            updates[item.name] = {
+                key: list(nested) if isinstance(nested, list) else nested
+                for key, nested in value.items()
+            }
+        elif isinstance(value, list):
+            updates[item.name] = list(value)
+        elif isinstance(value, set):
+            updates[item.name] = set(value)
+    return replace(state, **updates)

@@ -25,7 +25,7 @@ from .conflict import (
     derive_conflict_ref,
     make_conflict,
 )
-from .materialize import MemoryState, materialize
+from .materialize import MaterializationDelta, MemoryState, materialize
 from .memory import Memory, OpIdMode
 from .merge import MergeReport, QuarantinedOp, merge, merge_checked, merge_checked_authenticated
 from .model import (
@@ -73,7 +73,15 @@ from .resolver import (
     Resolver,
     ViewConstraints,
 )
-from .store import InMemoryStore, JsonlStore, OpStore, SQLiteStore
+from .store import (
+    IncrementalOpStore,
+    InMemoryStore,
+    JsonlStore,
+    MaterializationCheckpoint,
+    OpStore,
+    SQLiteStore,
+    StoreDelta,
+)
 from .view import Projection, build_view
 
 __all__ = [
@@ -108,12 +116,15 @@ __all__ = [
     "EvidenceAdded",
     "HeuristicResolver",
     "InMemoryStore",
+    "IncrementalOpStore",
     "JsonlStore",
     "LatestWriteWinsResolver",
     "LLMClient",
     "LLMResolver",
     "Memory",
     "MemoryState",
+    "MaterializationCheckpoint",
+    "MaterializationDelta",
     "MergeReport",
     "Op",
     "OpIdMode",
@@ -139,6 +150,7 @@ __all__ = [
     "SQLiteStore",
     "Source",
     "SourceAdded",
+    "StoreDelta",
     "SelectedState",
     "ValidityInterval",
     "ViewConstraints",

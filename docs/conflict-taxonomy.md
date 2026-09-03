@@ -60,6 +60,12 @@ the finding's incompatible-pair witnesses, and an aggregate finding is not auto-
 also exposes non-conflicting context/time alternatives in `Projection.compatible_claims`; request a
 specific context and/or time when one applicable value is needed.
 
+For canonical unscoped updates, StateFuse keeps a per-key direct-conflict index containing each
+claim's normalized value, context, validity interval, and incompatible edges. Adding a claim checks
+only that claim against context/validity-compatible candidates; retracting it removes only adjacent
+edges. Full materialization remains the recovery and correctness oracle. Custom conflict detectors
+stay on the full-materialization path because their dependency sets are opaque.
+
 ## Cross-key and domain conflicts
 
 A detector is a pure callable receiving `ConflictDetectionContext` and returning `ConflictSet`

@@ -10,6 +10,7 @@ The integration flow is deliberately one-way:
 commit immutable StateFuse operation
     -> materialize canonical StateFuse state
     -> build deterministic retrieval projections
+    -> record pending local projection deltas
     -> synchronize an external repository
 ```
 
@@ -38,10 +39,16 @@ projection can be rebuilt from canonical state.
 
 ## Retrieval and hydration
 
+Search combines external hits with committed, not-yet-synchronized records from
+`LocalProjectionDeltaStore`. Local upserts override stale copies of the same projection, while
+pending deletes suppress stale external hits. A pending entry is retired only after its matching
+external write succeeds.
+
 Search produces normalized `SearchHit` values, not authoritative claims. `hydrate_search_hits()`
-loads current StateFuse state, removes nonexistent entity references, deduplicates hits and entity
-IDs, and reports current claim and conflict statuses. A hit for a retracted claim is returned with
-`claim_statuses[claim_id] == "inactive"`; stale external text cannot reactivate it.
+loads current StateFuse state and expands each seed claim to its current conflicts, competing
+claims, and effective or stale resolution. It reports current statuses and explicit truncation
+when caller-supplied bounds are reached. A hit for a retracted claim is marked inactive; stale
+external text cannot reactivate it.
 
 ## Included connectors
 

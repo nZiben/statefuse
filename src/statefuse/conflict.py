@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import combinations
 from typing import Any, Protocol
 
@@ -41,6 +42,7 @@ class PredicateRegistry:
 
     def __init__(self) -> None:
         self._rules: dict[str, PredicateRule] = {}
+        self._revision = 0
 
     def register(
         self,
@@ -57,6 +59,11 @@ class PredicateRegistry:
             equal=equal,
             normalize_for_claim_ref=normalize_for_claim_ref,
         )
+        self._revision += 1
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     def rule_for(self, predicate: str) -> PredicateRule:
         return self._rules.get(predicate, PredicateRule(multi_valued=False))
@@ -223,6 +230,44 @@ class ConflictDetectionContext:
     predicate_registry: PredicateRegistry
 
 
+@dataclass(frozen=True)
+class DirectConflictIndex:
+    """Per-key claims and incompatible edges used by incremental materialization."""
+
+    claims_by_id: dict[str, Claim] = field(default_factory=dict)
+    normalized_values_by_claim_id: dict[str, Any] = field(default_factory=dict)
+    contexts_by_claim_id: dict[str, dict[str, JSONValue]] = field(default_factory=dict)
+    validity_by_claim_id: dict[str, tuple[datetime | None, datetime | None]] = field(
+        default_factory=dict
+    )
+    incompatible_pairs: dict[tuple[str, str], dict[str, JSONValue]] = field(
+        default_factory=dict
+    )
+    adjacent_claim_ids: dict[str, frozenset[str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "claims_by_id", dict(self.claims_by_id))
+        object.__setattr__(
+            self, "normalized_values_by_claim_id", dict(self.normalized_values_by_claim_id)
+        )
+        object.__setattr__(
+            self,
+            "contexts_by_claim_id",
+            {key: dict(value) for key, value in self.contexts_by_claim_id.items()},
+        )
+        object.__setattr__(self, "validity_by_claim_id", dict(self.validity_by_claim_id))
+        object.__setattr__(
+            self,
+            "incompatible_pairs",
+            {key: dict(value) for key, value in self.incompatible_pairs.items()},
+        )
+        object.__setattr__(
+            self,
+            "adjacent_claim_ids",
+            {key: frozenset(value) for key, value in self.adjacent_claim_ids.items()},
+        )
+
+
 class ConflictDetector(Protocol):
     def __call__(self, context: ConflictDetectionContext) -> Iterable[ConflictSet]:
         ...
@@ -344,8 +389,15 @@ def contexts_overlap(left: Mapping[str, JSONValue], right: Mapping[str, JSONValu
 
 
 def validity_overlaps(left: ValidityInterval | None, right: ValidityInterval | None) -> bool:
-    left_from, left_until = _validity_bounds(left)
-    right_from, right_until = _validity_bounds(right)
+    return _validity_bounds_overlap(_validity_bounds(left), _validity_bounds(right))
+
+
+def _validity_bounds_overlap(
+    left: tuple[datetime | None, datetime | None],
+    right: tuple[datetime | None, datetime | None],
+) -> bool:
+    left_from, left_until = left
+    right_from, right_until = right
     if left_from is not None and left_until is not None and left_from == left_until:
         return False
     if right_from is not None and right_until is not None and right_from == right_until:
@@ -374,7 +426,9 @@ def claim_applies(
     )
 
 
-def _validity_bounds(interval: ValidityInterval | None) -> tuple[Any | None, Any | None]:
+def _validity_bounds(
+    interval: ValidityInterval | None,
+) -> tuple[datetime | None, datetime | None]:
     if interval is None:
         return None, None
     return (
@@ -408,6 +462,255 @@ def _overlap_witness(left: Claim, right: Claim) -> dict[str, JSONValue]:
         "valid_until": min(ends, key=parse_utc_iso) if ends else None,
         "context": shared_context,
     }
+
+
+def _has_aggregate_applicability(claims: Sequence[Claim]) -> bool:
+    context_values: dict[str, set[Any]] = {}
+    for claim in claims:
+        for name, value in claim.context.items():
+            values = context_values.setdefault(name, set())
+            values.add(_context_equality_key(value))
+            if len(values) > 1:
+                return True
+
+    starts = [
+        parse_utc_iso(claim.validity.valid_from)
+        for claim in claims
+        if claim.validity is not None and claim.validity.valid_from is not None
+    ]
+    ends = [
+        parse_utc_iso(claim.validity.valid_until)
+        for claim in claims
+        if claim.validity is not None and claim.validity.valid_until is not None
+    ]
+    return bool(starts and ends and max(starts) >= min(ends))
+
+
+def _context_equality_key(value: JSONValue) -> Any:
+    """Hash JSON values with the same equality semantics as contexts_overlap()."""
+    if value is None:
+        return ("null",)
+    if isinstance(value, (bool, int, float)):
+        # Python intentionally considers True == 1 == 1.0; preserve that behavior.
+        return ("number", value)
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, list):
+        return ("list", tuple(_context_equality_key(item) for item in value))
+    return (
+        "object",
+        tuple(sorted((key, _context_equality_key(item)) for key, item in value.items())),
+    )
+
+
+def build_direct_conflict_index(
+    claims: Iterable[Claim],
+    registry: PredicateRegistry,
+    *,
+    conflict: ConflictSet | None = None,
+) -> DirectConflictIndex:
+    """Build an index without repeating semantic pair detection.
+
+    Full materialization supplies its already-detected conflict. Checkpoint recovery can
+    therefore reconstruct the index from the stored conflict witness in linear space.
+    """
+
+    claims_by_id = {claim.claim_id: claim for claim in claims}
+    normalized = {
+        claim_id: (
+            registry.normalize_value(claim.key.predicate, claim.value)
+            if registry.rule_for(claim.key.predicate).equal is None
+            else claim.value
+        )
+        for claim_id, claim in claims_by_id.items()
+    }
+    contexts = {claim_id: dict(claim.context) for claim_id, claim in claims_by_id.items()}
+    validity = {
+        claim_id: _validity_bounds(claim.validity)
+        for claim_id, claim in claims_by_id.items()
+    }
+    pairs: dict[tuple[str, str], dict[str, JSONValue]] = {}
+    if conflict is not None:
+        raw_pairs = conflict.witness.get("incompatible_pairs", [])
+        if isinstance(raw_pairs, list):
+            for raw_pair in raw_pairs:
+                if not isinstance(raw_pair, dict):
+                    continue
+                claim_ids = raw_pair.get("claim_ids")
+                if (
+                    not isinstance(claim_ids, list)
+                    or len(claim_ids) != 2
+                    or not all(isinstance(item, str) for item in claim_ids)
+                ):
+                    continue
+                left_id, right_id = sorted(claim_ids)
+                left = claims_by_id.get(left_id)
+                right = claims_by_id.get(right_id)
+                if left is not None and right is not None:
+                    pairs[(left_id, right_id)] = _overlap_witness(left, right)
+    return _direct_index(
+        claims_by_id=claims_by_id,
+        normalized=normalized,
+        contexts=contexts,
+        validity=validity,
+        pairs=pairs,
+    )
+
+
+def update_direct_conflict_index(
+    index: DirectConflictIndex,
+    claims: Iterable[Claim],
+    registry: PredicateRegistry,
+) -> tuple[DirectConflictIndex, int]:
+    """Update one key's index and return the semantic comparison count."""
+
+    desired = {claim.claim_id: claim for claim in claims}
+    claims_by_id = dict(index.claims_by_id)
+    normalized = dict(index.normalized_values_by_claim_id)
+    contexts = {key: dict(value) for key, value in index.contexts_by_claim_id.items()}
+    validity = dict(index.validity_by_claim_id)
+    pairs = {key: dict(value) for key, value in index.incompatible_pairs.items()}
+    adjacent = {key: set(value) for key, value in index.adjacent_claim_ids.items()}
+
+    for claim_id in sorted(set(claims_by_id) - set(desired)):
+        for other_id in tuple(adjacent.get(claim_id, ())):
+            pairs.pop(_pair_key(claim_id, other_id), None)
+            adjacent.get(other_id, set()).discard(claim_id)
+        adjacent.pop(claim_id, None)
+        claims_by_id.pop(claim_id, None)
+        normalized.pop(claim_id, None)
+        contexts.pop(claim_id, None)
+        validity.pop(claim_id, None)
+
+    comparisons = 0
+    for claim_id in sorted(set(desired) - set(claims_by_id)):
+        claim = desired[claim_id]
+        rule = registry.rule_for(claim.key.predicate)
+        normalized_value = (
+            registry.normalize_value(claim.key.predicate, claim.value)
+            if rule.equal is None
+            else claim.value
+        )
+        claim_context = dict(claim.context)
+        claim_validity = _validity_bounds(claim.validity)
+        if not rule.multi_valued:
+            for other_id in sorted(claims_by_id):
+                other = claims_by_id[other_id]
+                if not contexts_overlap(claim_context, contexts[other_id]):
+                    continue
+                if not _validity_bounds_overlap(claim_validity, validity[other_id]):
+                    continue
+                left, right = (
+                    (claim, other) if claim.claim_id < other.claim_id else (other, claim)
+                )
+                if rule.equal is None:
+                    left_normalized, right_normalized = (
+                        (normalized_value, normalized[other_id])
+                        if left is claim
+                        else (normalized[other_id], normalized_value)
+                    )
+                    if left_normalized == right_normalized:
+                        continue
+                comparisons += 1
+                if registry.values_equal(
+                    claim.key.predicate,
+                    left.value,
+                    right.value,
+                ):
+                    continue
+                pair = _pair_key(claim_id, other_id)
+                pairs[pair] = _overlap_witness(
+                    claim if pair[0] == claim_id else other,
+                    other if pair[1] == other_id else claim,
+                )
+                adjacent.setdefault(claim_id, set()).add(other_id)
+                adjacent.setdefault(other_id, set()).add(claim_id)
+        claims_by_id[claim_id] = claim
+        normalized[claim_id] = normalized_value
+        contexts[claim_id] = claim_context
+        validity[claim_id] = claim_validity
+        adjacent.setdefault(claim_id, set())
+
+    return (
+        _direct_index(
+            claims_by_id=claims_by_id,
+            normalized=normalized,
+            contexts=contexts,
+            validity=validity,
+            pairs=pairs,
+            adjacent=adjacent,
+        ),
+        comparisons,
+    )
+
+
+def conflict_from_direct_index(
+    index: DirectConflictIndex,
+    context: ConflictDetectionContext,
+    key: ClaimKey,
+) -> ConflictSet | None:
+    if not index.incompatible_pairs:
+        return None
+    participant_ids = {
+        claim_id for pair in index.incompatible_pairs for claim_id in pair
+    }
+    candidates = [index.claims_by_id[claim_id] for claim_id in sorted(participant_ids)]
+    conflict_class, conflict_subclass = _taxonomy_for(candidates)
+    annotations = _annotations_for(candidates, context)
+    if _has_aggregate_applicability(candidates):
+        annotations["applicability"] = "aggregate"
+    return make_conflict(
+        candidates=candidates,
+        distinct_values=_distinct_values_for_claims(
+            key.predicate, candidates, context.predicate_registry
+        ),
+        conflict_type=DIRECT_CONFLICT_TYPE,
+        reason=(
+            "functional predicate has incompatible active values in overlapping "
+            "context and validity"
+        ),
+        detector_id="direct",
+        conflict_class=conflict_class,
+        conflict_subclass=conflict_subclass,
+        key=key,
+        keys=(key,),
+        annotations=annotations,
+        witness={
+            "incompatible_pairs": [
+                index.incompatible_pairs[pair] for pair in sorted(index.incompatible_pairs)
+            ]
+        },
+    )
+
+
+def _pair_key(left_id: str, right_id: str) -> tuple[str, str]:
+    return (left_id, right_id) if left_id <= right_id else (right_id, left_id)
+
+
+def _direct_index(
+    *,
+    claims_by_id: dict[str, Claim],
+    normalized: dict[str, Any],
+    contexts: dict[str, dict[str, JSONValue]],
+    validity: dict[str, tuple[datetime | None, datetime | None]],
+    pairs: dict[tuple[str, str], dict[str, JSONValue]],
+    adjacent: dict[str, set[str]] | None = None,
+) -> DirectConflictIndex:
+    if adjacent is None:
+        adjacent = {claim_id: set() for claim_id in claims_by_id}
+        for left_id, right_id in pairs:
+            adjacent.setdefault(left_id, set()).add(right_id)
+            adjacent.setdefault(right_id, set()).add(left_id)
+    return DirectConflictIndex(
+        claims_by_id={key: claims_by_id[key] for key in sorted(claims_by_id)},
+        normalized_values_by_claim_id={key: normalized[key] for key in sorted(normalized)},
+        contexts_by_claim_id={key: contexts[key] for key in sorted(contexts)},
+        validity_by_claim_id={key: validity[key] for key in sorted(validity)},
+        incompatible_pairs={key: pairs[key] for key in sorted(pairs)},
+        adjacent_claim_ids={
+            key: frozenset(adjacent.get(key, set())) for key in sorted(claims_by_id)
+        },
+    )
 
 
 def _taxonomy_for(claims: Sequence[Claim]) -> tuple[str, str]:
@@ -495,11 +798,7 @@ def _direct_conflicts(context: ConflictDetectionContext) -> list[ConflictSet]:
         candidates = [claim for claim in claims if claim.claim_id in participant_ids]
         conflict_class, conflict_subclass = _taxonomy_for(candidates)
         annotations = _annotations_for(candidates, context)
-        if any(
-            not contexts_overlap(left.context, right.context)
-            or not validity_overlaps(left.validity, right.validity)
-            for left, right in combinations(candidates, 2)
-        ):
+        if _has_aggregate_applicability(candidates):
             annotations["applicability"] = "aggregate"
         conflicts.append(
             make_conflict(
