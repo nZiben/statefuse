@@ -60,7 +60,7 @@ class FakeLLMClient:
         return self.response
 
 
-def test_fake_llm_valid_json_resolves_conflict() -> None:
+def test_fake_llm_valid_json_suggests_conflict_resolution() -> None:
     oplog, c1, _ = _conflicting_state()
     state = materialize(oplog)
     resolver = LLMResolver(
@@ -70,7 +70,10 @@ def test_fake_llm_valid_json_resolves_conflict() -> None:
     )
     projection = build_view(state, constraints=ViewConstraints(scope="task"), resolver=resolver)
     key = ClaimKey(namespace="proj", subject="hq", predicate="city")
-    assert projection.selected_claims[key].claim_id == c1
+    assert projection.selected_claims == {}
+    assert projection.provisional_claims[key].claim_id == c1
+    assert projection.selection_basis[key] == "provisional"
+    assert len(projection.unresolved_conflicts) == 1
 
 
 def test_invalid_json_becomes_unresolved_without_crash() -> None:
@@ -114,7 +117,9 @@ class _ChatCompletionsStub:
 def test_openai_client_auto_falls_back_to_chat_completions() -> None:
     fake_client = SimpleNamespace(
         responses=_ResponsesStub(RuntimeError("responses unsupported")),
-        chat=SimpleNamespace(completions=_ChatCompletionsStub('{"chosen_claim_id":"c1","reason":"fallback"}')),
+        chat=SimpleNamespace(
+            completions=_ChatCompletionsStub('{"chosen_claim_id":"c1","reason":"fallback"}')
+        ),
     )
     client = OpenAIResponsesClient(client=fake_client, api_mode="auto")
     raw = client.resolve_json(
