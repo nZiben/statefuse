@@ -51,6 +51,13 @@ deterministic and limited by `max_depth` plus per-resource bounds. Missing, inac
 inapplicable, stale, and omitted records are reported explicitly. A hit for a retracted claim is
 marked inactive; stale external text cannot reactivate it.
 
+`ContextAssembler(max_tokens=N)` packs hydrated conflicts first, followed by standalone claims.
+Its documented token is one Unicode word or punctuation character; `token_count` uses that exact
+accounting, so callers using a provider tokenizer should reserve their own safety margin. Each
+conflict is atomic: every candidate and an effective resolution when resolved are included, or
+the conflict ID is returned in `omitted_conflict_ids`. Canonical IDs and JSON keep ordering and
+compression deterministic.
+
 ## Included connectors
 
 The connector layer implements four repository mappings:
