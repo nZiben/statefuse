@@ -131,10 +131,24 @@ def hydrate_search_hits(
     memory: Memory,
     hits: Iterable[SearchHit],
     *,
+    max_depth: int = 1,
     max_related_conflicts: int = 32,
     max_claims: int = 128,
+    max_evidence: int = 128,
+    max_sources: int = 64,
+    max_derivations: int = 32,
+    max_resolutions: int = 32,
 ) -> HydratedContext:
-    if max_related_conflicts < 1 or max_claims < 1:
+    if max_depth < 0:
+        raise ValueError("max_depth must not be negative.")
+    if min(
+        max_related_conflicts,
+        max_claims,
+        max_evidence,
+        max_sources,
+        max_derivations,
+        max_resolutions,
+    ) < 1:
         raise ValueError("Hydration bounds must be positive.")
     state = memory.materialize()
     unique_hits = tuple(
@@ -155,54 +169,150 @@ def hydrate_search_hits(
         for conflict_id in hit.conflict_ids
         if isinstance(conflict_id, str) and conflict_id
     }
-    current_conflict_ids = {
+    selected_conflict_ids = {
         conflict_id for conflict_id in hinted_conflict_ids if conflict_id in state.conflicts_by_id
     }
-    for claim_id in sorted(seed_claim_ids):
-        claim = state.claims_by_id.get(claim_id)
-        if claim is None:
-            continue
-        current_conflict_ids.update(
-            conflict.conflict_id
-            for conflict in state.conflicts_by_key.get(claim.key, ())
-            if any(candidate.claim_id == claim_id for candidate in conflict.candidates)
-        )
-
-    ordered_conflict_ids = sorted(current_conflict_ids)
-    selected_conflict_ids = ordered_conflict_ids[:max_related_conflicts]
-    omitted_conflict_ids = ordered_conflict_ids[max_related_conflicts:]
+    ordered_conflict_ids = sorted(selected_conflict_ids)
+    selected_conflict_ids = set(ordered_conflict_ids[:max_related_conflicts])
+    omitted_conflict_ids = set(ordered_conflict_ids[max_related_conflicts:])
     all_claim_ids = set(seed_claim_ids)
     for conflict_id in selected_conflict_ids:
         all_claim_ids.update(
             claim.claim_id for claim in state.conflicts_by_id[conflict_id].candidates
         )
-    ordered_claim_ids = sorted(all_claim_ids)
+
+    derivations_by_claim_id: dict[str, set[str]] = {}
+    for derivation in state.derivations_by_id.values():
+        for claim_id in (*derivation.input_claim_ids, *derivation.output_claim_ids):
+            derivations_by_claim_id.setdefault(claim_id, set()).add(derivation.derivation_id)
+    for claim in state.claims_by_id.values():
+        if claim.derivation_id in state.derivations_by_id:
+            assert claim.derivation_id is not None
+            derivations_by_claim_id.setdefault(claim.claim_id, set()).add(claim.derivation_id)
+    selected_derivation_ids: set[str] = set()
+    omitted_derivation_ids: set[str] = set()
+    frontier = set(all_claim_ids)
+    for _ in range(max_depth):
+        discovered_conflicts: set[str] = set()
+        discovered_derivations: set[str] = set()
+        for claim_id in sorted(frontier):
+            claim = state.claims_by_id.get(claim_id)
+            if claim is not None:
+                discovered_conflicts.update(
+                    conflict.conflict_id
+                    for conflict in state.conflicts_by_key.get(claim.key, ())
+                    if any(candidate.claim_id == claim_id for candidate in conflict.candidates)
+                )
+            discovered_derivations.update(derivations_by_claim_id.get(claim_id, ()))
+
+        ordered_conflict_ids = sorted(selected_conflict_ids | discovered_conflicts)
+        selected_conflict_ids = set(ordered_conflict_ids[:max_related_conflicts])
+        omitted_conflict_ids.update(ordered_conflict_ids[max_related_conflicts:])
+        ordered_derivation_ids = sorted(selected_derivation_ids | discovered_derivations)
+        selected_derivation_ids = set(ordered_derivation_ids[:max_derivations])
+        omitted_derivation_ids.update(ordered_derivation_ids[max_derivations:])
+
+        expanded_claim_ids = {
+            claim.claim_id
+            for conflict_id in selected_conflict_ids
+            for claim in state.conflicts_by_id[conflict_id].candidates
+        }
+        for derivation_id in selected_derivation_ids:
+            derivation = state.derivations_by_id[derivation_id]
+            expanded_claim_ids.update(derivation.input_claim_ids)
+            expanded_claim_ids.update(derivation.output_claim_ids)
+        frontier = expanded_claim_ids - all_claim_ids
+        all_claim_ids.update(expanded_claim_ids)
+
+    ordered_claim_ids = sorted(all_claim_ids & state.claims_by_id.keys())
     claim_ids = ordered_claim_ids[:max_claims]
-    omitted_claim_ids = ordered_claim_ids[max_claims:]
+    omitted_claim_ids = set(ordered_claim_ids[max_claims:])
     claims = tuple(
         state.claims_by_id[claim_id] for claim_id in claim_ids if claim_id in state.claims_by_id
     )
     conflicts = tuple(
         state.conflicts_by_id[conflict_id]
-        for conflict_id in selected_conflict_ids
-        if conflict_id in state.conflicts_by_id
+        for conflict_id in sorted(selected_conflict_ids)
     )
-    resolutions: dict[str, ResolutionRecord] = {}
+    derivations = tuple(
+        state.derivations_by_id[derivation_id]
+        for derivation_id in sorted(selected_derivation_ids)
+    )
+    missing_derivation_ids = {
+        claim.derivation_id
+        for claim in claims
+        if claim.derivation_id is not None and claim.derivation_id not in state.derivations_by_id
+    }
+
+    lanes = []
     resolution_statuses: dict[str, str] = {}
     for conflict in conflicts:
         lane = (conflict.conflict_ref, None)
-        resolution = state.effective_resolutions_by_conflict_ref_and_scope.get(lane)
-        if resolution is None:
-            continue
-        resolutions[resolution.resolution_id] = resolution
-        resolution_statuses[resolution.resolution_id] = (
-            state.lifecycle_status_by_conflict_ref_and_scope.get(lane, "open")
-        )
+        status = state.lifecycle_status_by_conflict_ref_and_scope.get(lane, "open")
+        effective = state.effective_resolutions_by_conflict_ref_and_scope.get(lane)
+        active = state.active_resolutions_by_conflict_ref_and_scope.get(lane)
+        lanes.append((lane, status, effective, active))
+
+    prioritized = [
+        resolution
+        for _, _, effective, active in lanes
+        for resolution in (effective, active)
+        if resolution is not None
+    ]
+    prioritized.extend(
+        resolution
+        for lane, _, _, _ in lanes
+        for resolution in reversed(state.resolutions_by_conflict_ref_and_scope.get(lane, ()))
+    )
+    ordered_resolutions = {
+        resolution.resolution_id: resolution for resolution in prioritized
+    }
+    resolution_ids = list(ordered_resolutions)[:max_resolutions]
+    resolution_history = {
+        resolution_id: ordered_resolutions[resolution_id] for resolution_id in resolution_ids
+    }
+    omitted_resolution_ids = set(ordered_resolutions) - resolution_history.keys()
+    effective_resolutions: dict[str, ResolutionRecord] = {}
+    stale_resolutions: dict[str, ResolutionRecord] = {}
+    resolution_statuses.update(
+        (resolution_id, "superseded") for resolution_id in resolution_history
+    )
+    for _, status, effective, active in lanes:
+        if effective is not None and effective.resolution_id in resolution_history:
+            effective_resolutions[effective.resolution_id] = effective
+        if active is not None and active.resolution_id in resolution_history:
+            resolution_statuses[active.resolution_id] = status
+        if (
+            status == "reopened"
+            and active is not None
+            and active.resolution_id in resolution_history
+        ):
+            stale_resolutions[active.resolution_id] = active
+
+    requested_evidence_ids = {
+        evidence_id
+        for claim in claims
+        for evidence_id in claim.evidence_ids
+    } | {
+        evidence_id
+        for resolution in resolution_history.values()
+        for evidence_id in resolution.evidence_ids
+    }
+    existing_evidence_ids = sorted(requested_evidence_ids & state.evidence_by_id.keys())
+    evidence_ids = existing_evidence_ids[:max_evidence]
+    omitted_evidence_ids = set(existing_evidence_ids[max_evidence:])
+    evidence = tuple(state.evidence_by_id[evidence_id] for evidence_id in evidence_ids)
+    requested_source_ids = {
+        item.source_id for item in evidence if item.source_id is not None
+    }
+    existing_source_ids = sorted(requested_source_ids & state.sources_by_id.keys())
+    source_ids = existing_source_ids[:max_sources]
+    omitted_source_ids = set(existing_source_ids[max_sources:])
     return HydratedContext(
         claims=claims,
         conflicts=conflicts,
         missing_claim_ids=tuple(
-            claim_id for claim_id in sorted(seed_claim_ids) if claim_id not in state.claims_by_id
+            claim_id for claim_id in sorted(all_claim_ids) if claim_id not in state.claims_by_id
         ),
         missing_conflict_ids=tuple(
             conflict_id
@@ -211,7 +321,13 @@ def hydrate_search_hits(
         ),
         search_hits=unique_hits,
         claim_statuses={
-            claim.claim_id: "inactive" if claim.claim_id in state.inactive_claim_ids else "active"
+            claim.claim_id: (
+                "inactive"
+                if claim.claim_id in state.inactive_claim_ids
+                else "inapplicable"
+                if claim.claim_id in state.inapplicable_claim_ids
+                else "active"
+            )
             for claim in claims
         },
         conflict_statuses={
@@ -220,10 +336,22 @@ def hydrate_search_hits(
             )
             for conflict in conflicts
         },
-        resolutions=tuple(resolutions[key] for key in sorted(resolutions)),
+        resolutions=tuple(effective_resolutions[key] for key in sorted(effective_resolutions)),
+        resolution_history=tuple(resolution_history.values()),
+        stale_resolutions=tuple(stale_resolutions[key] for key in sorted(stale_resolutions)),
         resolution_statuses=resolution_statuses,
-        omitted_claim_ids=tuple(omitted_claim_ids),
-        omitted_conflict_ids=tuple(omitted_conflict_ids),
+        evidence=evidence,
+        sources=tuple(state.sources_by_id[source_id] for source_id in source_ids),
+        derivations=derivations,
+        missing_evidence_ids=tuple(sorted(requested_evidence_ids - state.evidence_by_id.keys())),
+        missing_source_ids=tuple(sorted(requested_source_ids - state.sources_by_id.keys())),
+        missing_derivation_ids=tuple(sorted(missing_derivation_ids)),
+        omitted_claim_ids=tuple(sorted(omitted_claim_ids)),
+        omitted_conflict_ids=tuple(sorted(omitted_conflict_ids)),
+        omitted_evidence_ids=tuple(sorted(omitted_evidence_ids)),
+        omitted_source_ids=tuple(sorted(omitted_source_ids)),
+        omitted_derivation_ids=tuple(sorted(omitted_derivation_ids)),
+        omitted_resolution_ids=tuple(sorted(omitted_resolution_ids)),
     )
 
 

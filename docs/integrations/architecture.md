@@ -46,9 +46,17 @@ external write succeeds.
 
 Search produces normalized `SearchHit` values, not authoritative claims. `hydrate_search_hits()`
 loads current StateFuse state and expands each seed claim to its current conflicts, competing
-claims, and effective or stale resolution. It reports current statuses and explicit truncation
-when caller-supplied bounds are reached. A hit for a retracted claim is marked inactive; stale
-external text cannot reactivate it.
+claims, evidence, sources, derivations, and effective or stale resolution. Expansion is
+deterministic and limited by `max_depth` plus per-resource bounds. Missing, inactive,
+inapplicable, stale, and omitted records are reported explicitly. A hit for a retracted claim is
+marked inactive; stale external text cannot reactivate it.
+
+`ContextAssembler(max_tokens=N)` packs hydrated conflicts first, followed by standalone claims.
+Its documented token is one Unicode word or punctuation character; `token_count` uses that exact
+accounting, so callers using a provider tokenizer should reserve their own safety margin. Each
+conflict is atomic: every candidate and an effective resolution when resolved are included, or
+the conflict ID is returned in `omitted_conflict_ids`. Canonical IDs and JSON keep ordering and
+compression deterministic.
 
 ## Included connectors
 

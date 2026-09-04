@@ -6,6 +6,7 @@ from .base import (
     LocalProjectionDeltaStore,
     MemoryRepositoryAdapter,
 )
+from .context import AssembledContext, ContextAssembler
 from .errors import (
     AdapterAuthenticationError,
     AdapterConfigurationError,
@@ -60,6 +61,8 @@ __all__ = [
     "AsyncMem0Adapter",
     "AsyncMemoryRepositoryAdapter",
     "AsyncProjectionService",
+    "AssembledContext",
+    "ContextAssembler",
     "ExternalReference",
     "ExternalReferenceStore",
     "ExternalWriteResult",
