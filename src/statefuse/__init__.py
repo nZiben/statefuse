@@ -25,7 +25,7 @@ from .conflict import (
     derive_conflict_ref,
     make_conflict,
 )
-from .materialize import MemoryState, materialize
+from .materialize import MaterializationDelta, MemoryState, materialize
 from .memory import Memory, OpIdMode
 from .merge import MergeReport, QuarantinedOp, merge, merge_checked, merge_checked_authenticated
 from .model import (
@@ -53,6 +53,7 @@ from .ops import (
     ResolutionAdded,
     SourceAdded,
 )
+from .replica import ReplicaDelta, ReplicaManifest, ReplicaProgress, ReplicaSyncReport
 from .resolution_policy import (
     Abstention,
     CausalResolver,
@@ -73,12 +74,23 @@ from .resolver import (
     Resolver,
     ViewConstraints,
 )
-from .store import InMemoryStore, JsonlStore, OpStore, SQLiteStore
+from .store import (
+    BatchOpStore,
+    IncrementalOpStore,
+    InMemoryStore,
+    JsonlStore,
+    MaterializationCheckpoint,
+    OpStore,
+    ReplicaProgressStore,
+    SQLiteStore,
+    StoreDelta,
+)
 from .view import Projection, build_view
 
 __all__ = [
     "Abstention",
     "AnyOp",
+    "BatchOpStore",
     "CausalResolver",
     "CompactionReport",
     "Claim",
@@ -108,12 +120,15 @@ __all__ = [
     "EvidenceAdded",
     "HeuristicResolver",
     "InMemoryStore",
+    "IncrementalOpStore",
     "JsonlStore",
     "LatestWriteWinsResolver",
     "LLMClient",
     "LLMResolver",
     "Memory",
     "MemoryState",
+    "MaterializationCheckpoint",
+    "MaterializationDelta",
     "MergeReport",
     "Op",
     "OpIdMode",
@@ -131,6 +146,11 @@ __all__ = [
     "ResolutionContext",
     "ResolutionRecord",
     "ResolutionResult",
+    "ReplicaDelta",
+    "ReplicaManifest",
+    "ReplicaProgress",
+    "ReplicaProgressStore",
+    "ReplicaSyncReport",
     "Resolver",
     "ResolverRegistry",
     "retraction_signature_status",
@@ -139,6 +159,7 @@ __all__ = [
     "SQLiteStore",
     "Source",
     "SourceAdded",
+    "StoreDelta",
     "SelectedState",
     "ValidityInterval",
     "ViewConstraints",

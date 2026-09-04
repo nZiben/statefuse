@@ -24,6 +24,21 @@ class OpLog:
             raise ValueError(f"op_id collision with different payload: {op.op_id}")
         return False
 
+    def add_many(self, *ops: AnyOp) -> tuple[bool, ...]:
+        pending: dict[str, AnyOp] = {}
+        results: list[bool] = []
+        for op in ops:
+            existing = pending.get(op.op_id) or self._ops.get(op.op_id)
+            if existing is not None:
+                if existing != op:
+                    raise ValueError(f"op_id collision with different payload: {op.op_id}")
+                results.append(False)
+                continue
+            pending[op.op_id] = op
+            results.append(True)
+        self._ops.update(pending)
+        return tuple(results)
+
     def has(self, op_id: str) -> bool:
         return op_id in self._ops
 

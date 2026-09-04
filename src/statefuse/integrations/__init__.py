@@ -3,6 +3,7 @@ from __future__ import annotations
 from .base import (
     AsyncMemoryRepositoryAdapter,
     ExternalReferenceStore,
+    LocalProjectionDeltaStore,
     MemoryRepositoryAdapter,
 )
 from .errors import (
@@ -28,6 +29,7 @@ from .models import (
     ExternalReference,
     ExternalWriteResult,
     HydratedContext,
+    PendingProjectionDelta,
     RetrievalRecord,
     SearchHit,
     SearchRequest,
@@ -36,11 +38,13 @@ from .models import (
 )
 from .projection import (
     AsyncProjectionService,
+    ProjectionDelta,
     ProjectionService,
     hydrate_search_hits,
     project_state,
+    project_state_delta,
 )
-from .registry import InMemoryExternalReferenceStore
+from .registry import InMemoryExternalReferenceStore, InMemoryLocalProjectionDeltaStore
 
 __all__ = [
     "AdapterAuthenticationError",
@@ -63,17 +67,22 @@ __all__ = [
     "GraphitiAdapter",
     "HydratedContext",
     "InMemoryExternalReferenceStore",
+    "InMemoryLocalProjectionDeltaStore",
     "LangGraphStoreAdapter",
     "LangMemAdapter",
     "LettaAdapter",
+    "LocalProjectionDeltaStore",
     "Mem0Adapter",
     "MemoryRepositoryAdapter",
     "ProjectionService",
+    "ProjectionDelta",
     "RetrievalRecord",
+    "PendingProjectionDelta",
     "SearchHit",
     "SearchRequest",
     "SyncFailure",
     "SyncReport",
     "hydrate_search_hits",
     "project_state",
+    "project_state_delta",
 ]

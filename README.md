@@ -55,10 +55,32 @@ memory.add_claim(
 )
 ```
 
+Operations extracted from one logical event can be committed together with
+`memory.commit_batch(ops)`. `InMemoryStore` and `SQLiteStore` make the batch atomically visible.
+`JsonlStore` stores each batch in one envelope line and ignores an incomplete final line; retrying
+appends the complete batch. JSONL is intended for one writer—use SQLite when writers are concurrent.
+Operation-ID idempotency and collision checks are identical to `append()`.
+
 See [`examples/`](examples/) for branching, merging, and conflict-resolution flows.
 
 For context/validity-aware detection, taxonomy annotations, multi-key domain detectors, and
 preserve/abstain outcomes, see [Taxonomy-aware conflicts](docs/conflict-taxonomy.md).
+
+## Incremental replica sync
+
+Replicas can pull only the unseen suffix of a peer's append-only log. Receive cursors are stored
+per peer and survive restarts with `JsonlStore` and `SQLiteStore`.
+
+```python
+from statefuse import JsonlStore, Memory
+
+sender = Memory(JsonlStore("sender.jsonl"), replica_id="agent-a")
+receiver = Memory(JsonlStore("receiver.jsonl"), replica_id="agent-b")
+
+report = receiver.sync_from(sender, max_ops=500)
+```
+
+See [Replica delta sync](docs/replica-sync.md) for retry, reordering, and compaction behavior.
 
 ## Adapters
 
@@ -99,6 +121,16 @@ Synchronize only after the StateFuse operation commits. Adapter failures are ret
 - [Included adapters](docs/integrations/connectors.md)
 - [Build a custom adapter](docs/integrations/custom-adapter.md)
 - [Test an adapter](docs/integrations/testing.md)
+
+## Incremental materialization
+
+Built-in stores expose cursors so repeated `Memory.materialize()` calls process only newly
+appended operations. JSONL and SQLite stores also save versioned checkpoints every 100 applied
+operations; incompatible checkpoint versions fall back to a full rebuild.
+
+Custom conflict detectors always use full materialization. A custom `PredicateRegistry` is only
+checkpointed when `materialization_config_token` is supplied; change that token whenever predicate
+semantics change. Runtime registry changes invalidate the in-memory cache automatically.
 
 ## Development
 
